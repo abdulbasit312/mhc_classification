@@ -55,7 +55,7 @@ class DiseaseTweetsDataset(Dataset):
         path=os.path.dirname(tweet_file)
         user=path.split("/")[-1]
         label=disease2id[path.split("/")[-2]]
-        return {"user": user, "tokenized_tweets": tweets, "label":label}
+        return {"user": user, "tokenized_tweets": tokenized, "label":label}
 
 
 if __name__ == "__main__":
