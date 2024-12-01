@@ -42,12 +42,12 @@ class PsyEx_wo_symp(nn.Module):
         feats = []
         attn_scores = []
         for user_feats in batch:
-            post_outputs = self.post_encoder(user_feats["input_ids"], user_feats["attention_mask"], user_feats["token_type_ids"])
+            post_outputs = self.post_encoder(user_feats["tokenized_tweets"]["input_ids"], user_feats["tokenized_tweets"]["attention_mask"], user_feats["tokenized_tweets"]["token_type_ids"])
             # [num_posts, seq_len, hidden_size] -> [num_posts, 1, hidden_size]
             if self.pool_type == "first":
                 x = post_outputs.last_hidden_state[:, 0:1, :]
             elif self.pool_type == 'mean':
-                x = mean_pooling(post_outputs.last_hidden_state, user_feats["attention_mask"]).unsqueeze(1)
+                x = mean_pooling(post_outputs.last_hidden_state, user_feats["tokenized_tweets"]["attention_mask"]).unsqueeze(1)
             # positional embedding for posts
             x = x + self.pos_emb[:x.shape[0], :].unsqueeze(1)
             x = self.user_encoder(x).squeeze(1) # [num_posts, hidden_size]
