@@ -49,7 +49,7 @@ class DiseaseTweetsDataset(Dataset):
         #posts = record['selected_posts'][:max_posts]
         #tokenized = tokenizer(posts, truncation=True, padding='max_length', max_length=max_len)
         tweet_file = self.data[idx]
-        tweets = pd.read_parquet(tweet_file)["text"].tolist()  # Assuming 'text' column contains the tweets
+        tweets = pd.read_parquet(tweet_file)["text"].tolist()[0:25]  # Assuming 'text' column contains the tweets
         tokenized = self.tokeniser(tweets, truncation=True, padding='max_length',return_tensors='pt')
 
         path=os.path.dirname(tweet_file)
