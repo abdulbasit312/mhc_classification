@@ -14,6 +14,9 @@ tokenizer = AutoTokenizer.from_pretrained(model_name, token=True)
 model = AutoModel.from_pretrained(model_name, token=True).to(device)
 
 def read_texts(path, model, tokenizer, text_column='text'):
+    '''
+    returns Nx768 matrix
+    '''
     start_time = time.time()
     df = pd.read_parquet(path)
 

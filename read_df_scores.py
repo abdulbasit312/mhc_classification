@@ -21,11 +21,17 @@ col_names = ['Do things easily get painful consequences', 'Worthlessness and gui
 
 
 def read_scores(path, col_names):
+    '''
+    returns Nx38 matrix
+    '''
     df = pd.read_parquet(path)
     matrix = df[col_names].to_numpy()
     return matrix
 
 def read_scores_mean(path, col_names):
+    '''
+    returns 1x38 matrix. Nx38 is reduced to 1x38 by taking the mean of each column.
+    '''
     df = pd.read_parquet(path)
     column_means = df[col_names].mean(axis=0).to_numpy()
     matrix = column_means.reshape(1, -1)
