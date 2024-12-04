@@ -22,7 +22,9 @@ def create_data_splits(input_dir, output_dir, train_ratio=0.7, val_ratio=0.10, t
     
     for folder in os.listdir(input_dir):
         folder_path = os.path.join(input_dir, folder)
-
+        if not os.path.isdir(folder_path):
+            continue
+            
         profiles = os.listdir(folder_path)
         train_profiles, temp_profiles = train_test_split(profiles, test_size=(1 - train_ratio), random_state=seed)
         val_profiles, test_profiles = train_test_split(temp_profiles, test_size=test_ratio / (val_ratio + test_ratio), random_state=seed)
