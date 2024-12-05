@@ -442,11 +442,14 @@ class SymptomStream(nn.Module):
         self.hidden_dim = 38  # Number of symptom features
         if self.hidden_dim % num_heads != 0:
             raise ValueError(f"`num_heads` must divide `hidden_dim` (38). Use `num_heads` as 1, 2, or 19.")
+        
         encoder_layer = nn.TransformerEncoderLayer(
             d_model=self.hidden_dim, dim_feedforward=self.hidden_dim, nhead=num_heads, activation='gelu'
         )
         self.user_encoder = nn.TransformerEncoder(encoder_layer, num_layers=num_trans_layers)
-        self.attn_ff = nn.Linear(self.hidden_dim, 1)
+        
+        self.attn_ff = nn.ModuleList([nn.Linear(self.hidden_dim, 1) for _ in id2disease])
+        
         self.dropout = nn.Dropout(0.1)
         self.clf = nn.ModuleList([nn.Linear(self.hidden_dim, 1) for _ in id2disease])
 
@@ -454,19 +457,26 @@ class SymptomStream(nn.Module):
         feats = []
         attn_scores = []
         for user_feats in batch:
-            # Symptom features
             x = user_feats["symp"]  # Shape: [num_posts, hidden_dim]
-            x = self.user_encoder(x)  # Apply transformer
-            attn_score = torch.softmax(self.attn_ff(x).squeeze(), -1)  # Attention over posts
-            feat = self.dropout(attn_score @ x)  # Weighted sum
-            feats.append(feat)
-            attn_scores.append(attn_score)
+            x = self.user_encoder(x)
+            
+            disease_attn_scores = []
+            disease_feats = []
+            for i, disease_attn in enumerate(self.attn_ff):
+                attn_score = torch.softmax(disease_attn(x).squeeze(), -1)  # Disease-specific attention over posts
+                feat = self.dropout(attn_score @ x)  # Weighted sum of features
+                disease_attn_scores.append(attn_score)
+                disease_feats.append(feat)
+            
+            feats.append(disease_feats)
+            attn_scores.append(disease_attn_scores)
 
         logits = []
         for i in range(len(id2disease)):
-            tmp = torch.stack([feats[j] for j in range(len(feats))])
+            tmp = torch.stack([feats[j][i] for j in range(len(feats))])  # Stack features for each disease
             logit = self.clf[i](tmp)
             logits.append(logit)
+        
         logits = torch.stack(logits, dim=0).transpose(0, 1).squeeze()
         return logits, attn_scores
 
