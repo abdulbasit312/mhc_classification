@@ -129,6 +129,7 @@ class HierDataset(Dataset):
                 else:
                     continue
 
+            # Inside HierDataset class
             for profile_folder in os.listdir(folder_path):
                 profile_path = os.path.join(folder_path, profile_folder)
                 tweets_file = os.path.join(profile_path, "tweets_preprocessed.parquet")
@@ -149,11 +150,12 @@ class HierDataset(Dataset):
                         padding = np.zeros((max_posts - symp.shape[0], symp.shape[1]))
                         symp = np.vstack((symp, padding))
 
-                # Tokenize posts
+                # Tokenize posts only if tokenizer is provided
                 sample = {}
-                tokenized = tokenizer(posts, truncation=True, padding='max_length', max_length=max_len)
-                for k, v in tokenized.items():
-                    sample[k] = v
+                if self.tokenizer:
+                    tokenized = self.tokenizer(posts, truncation=True, padding='max_length', max_length=self.max_len)
+                    for k, v in tokenized.items():
+                        sample[k] = v
 
                 if symp is not None:
                     sample["symp"] = symp  # Add symptom features to the sample
@@ -326,6 +328,10 @@ class LightningInterface(pl.LightningModule):
             y_hat, attn_scores = y_hat
         yy, yy_hat = y.detach().cpu().numpy(), y_hat.sigmoid().detach().cpu().numpy()
 
+        # Ensure probs are consistently shaped (match number of classes)
+        if yy_hat.ndim == 1:
+            yy_hat = np.pad(yy_hat[:, None], ((0, 0), (0, len(id2disease) - 1)), constant_values=0)
+
         # Calculate loss
         if self.setting == 'binary':
             val_loss = self.criterion(y_hat, y, label_masks)
@@ -340,9 +346,13 @@ class LightningInterface(pl.LightningModule):
         # Compute average loss
         avg_loss = torch.stack([x['val_loss'] for x in self.validation_outputs]).mean()
 
-        # Concatenate labels and probabilities for metrics computation
+        # Concatenate labels and probabilities
         all_labels = np.concatenate([x['labels'] for x in self.validation_outputs])
-        all_probs = np.concatenate([x['probs'] for x in self.validation_outputs])
+        all_probs = np.concatenate([
+            np.pad(x['probs'], ((0, 0), (0, len(id2disease) - x['probs'].shape[1])), constant_values=0)
+            if x['probs'].ndim == 2 and x['probs'].shape[1] < len(id2disease) else x['probs']
+            for x in self.validation_outputs
+        ])
 
         # Compute metrics
         ret = get_avg_metrics(all_labels, all_probs, self.threshold, self.disease, self.setting)
@@ -490,8 +500,8 @@ class SymptomClassifier(LightningInterface):
 
 
 
-os.environ["TOKENIZERS_PARALLELISM"] = "false"
-tokenizer = AutoTokenizer.from_pretrained("AIMH/mental-bert-base-cased")
+#os.environ["TOKENIZERS_PARALLELISM"] = "false"
+#tokenizer = AutoTokenizer.from_pretrained("AIMH/mental-bert-base-cased")
 
 input_dir = "/w/247/baileyng/mental_dataset_split_compressed" 
 batch_size = 4
@@ -505,7 +515,7 @@ control_ratio = 0.5
 data_module = HierDataModule(
     bs=batch_size,
     input_dir=input_dir,
-    tokenizer=tokenizer,  # No tokenizer needed for symptom-only model
+    tokenizer=None,  # No tokenizer needed for symptom-only model
     max_len=max_len,
     disease='anxiety',  # Use 'None' for all diseases or specify one like 'anxiety'
     setting='binary',
