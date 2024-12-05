@@ -345,7 +345,7 @@ def train_model(model, train_loader, val_loader, criterion, optimizer, num_epoch
         all_labels = []
         all_probs = []
         with torch.no_grad():
-            for batch in val_loader:
+            for batch in val_loader:  # or test_loader
                 x, y, label_masks = batch
                 x = [{k: v.to(device) for k, v in user_feats.items()} for user_feats in x]
                 y = y.to(device)
@@ -355,19 +355,15 @@ def train_model(model, train_loader, val_loader, criterion, optimizer, num_epoch
                 loss = criterion(y_hat, y, label_masks)
                 total_val_loss += loss.item()
 
-                probs = torch.sigmoid(y_hat).cpu().numpy()
-                if probs.ndim == 1:
-                    probs = probs[np.newaxis, :]
-                all_probs.append(probs)
+                probs = torch.sigmoid(y_hat)
+                if probs.dim() == 1:
+                    probs = probs.unsqueeze(0)  # Ensure 2D
+                all_labels.append(y.cpu().numpy())
+                all_probs.append(probs.cpu().numpy())
 
-                labels = y.cpu().numpy()
-                if labels.ndim == 1:
-                    labels = labels[np.newaxis, :]
-                all_labels.append(labels)
-
-        avg_val_loss = total_val_loss / len(val_loader)
         all_labels = np.concatenate(all_labels)
         all_probs = np.concatenate(all_probs)
+        avg_val_loss = total_val_loss / len(val_loader)
         ret = get_avg_metrics(all_labels, all_probs, threshold, disease, setting)
         print(f"Validation Loss: {avg_val_loss:.4f}")
         print(f"Validation Metrics: {ret}")
@@ -384,7 +380,7 @@ def test_model(model, test_loader, criterion, device, threshold=0.5, disease='No
     all_labels = []
     all_probs = []
     with torch.no_grad():
-        for batch in test_loader:
+        for batch in val_loader:  # or test_loader
             x, y, label_masks = batch
             x = [{k: v.to(device) for k, v in user_feats.items()} for user_feats in x]
             y = y.to(device)
@@ -392,15 +388,18 @@ def test_model(model, test_loader, criterion, device, threshold=0.5, disease='No
 
             y_hat, attn_scores = model(x)
             loss = criterion(y_hat, y, label_masks)
-            total_test_loss += loss.item()
+            total_val_loss += loss.item()
 
             probs = torch.sigmoid(y_hat)
+            if probs.dim() == 1:
+                probs = probs.unsqueeze(0)  # Ensure 2D
             all_labels.append(y.cpu().numpy())
             all_probs.append(probs.cpu().numpy())
 
-    avg_test_loss = total_test_loss / len(test_loader)
     all_labels = np.concatenate(all_labels)
     all_probs = np.concatenate(all_probs)
+
+    avg_test_loss = total_test_loss / len(test_loader)
     ret = get_avg_metrics(all_labels, all_probs, threshold, disease, setting)
     print(f"Test Loss: {avg_test_loss:.4f}")
     print(f"Test Metrics: {ret}")
