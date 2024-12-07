@@ -64,10 +64,12 @@ symptoms = [
     "Anger Irritability"
 ]
 
-model_name = "bert-base-uncased"
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+model_name = "bert-base-uncased"
 classifier = mentalBertClassifier(model_name, device)
-optimizer = torch.optim.Adam(classifier.parameters(), lr=1e-5)
+state_dict_path = "mentalBertClassifier2.pth"
+classifier.load_state_dict(torch.load(state_dict_path, map_location=device))
+classifier.eval()
 
 instructor_name = "valhalla/distilbart-mnli-12-1"
 instructor = AutoModelForSequenceClassification.from_pretrained(model_name).to(device)
@@ -75,13 +77,14 @@ tokenizer_instructor = AutoTokenizer.from_pretrained(model_name)
 classifier_pipeline = pipeline("zero-shot-classification", model=instructor, tokenizer=tokenizer_instructor, device=device)
 
 
-batch_size = 16
+batch_size = 2
 
 base_path = "processed"
-for split in ["train"]:
+for split in ["test"]:
     for disease in id2disease:
         start_time = time.time()
         disease_dir = os.path.join(base_path, split, disease)
+        i = 0
         for user_dir in os.listdir(disease_dir):
             user_path = os.path.join(disease_dir, user_dir)
             tweets_file = os.path.join(user_path, 'tweets.json')
@@ -97,10 +100,10 @@ for split in ["train"]:
 
                 results = []
                 try:
-                    classifications = classifier_pipeline(tweets[:16], candidate_labels=symptoms, multi_label=True, batch_size=batch_size)
+                    classifications = classifier_pipeline(tweets[:2], candidate_labels=symptoms, multi_label=True, batch_size=batch_size)
                 except ValueError as e:
                     print(f"Error: {e}")
-                    print(f"Texts: {tweets[:16]}")
+                    print(f"Texts: {tweets[:2]}")
                     print(f"Labels: {symptoms}")
                 
                 for classification in classifications:
@@ -108,18 +111,11 @@ for split in ["train"]:
                     results.append(scores)
                 results = torch.tensor([list(result.values()) for result in results], requires_grad=False).to(device)
 
-                logits = classifier.classify(texts[:16])
-                logits.requires_grad = True
-
-                loss = torch.nn.functional.mse_loss(logits, results)
-                loss.backward()
-                optimizer.step()
-                optimizer.zero_grad()
-
+                logits = classifier.classify(tweets[:2])
+                if(i%20==0):
+                    print(logits[0]-results[0])
+                    print(torch.nn.functional.mse_loss(logits, results))
+                i+=1
+                
         print("Max allocated memory:", torch.cuda.max_memory_allocated())
         print(f"Processed {disease} in {time.time() - start_time:.2f} seconds")
-        print(loss.item())
-
-model_save_path = "mentalBertClassifier.pth"
-torch.save(classifier.state_dict(), model_save_path)
-print(f"Model saved to {model_save_path}")
