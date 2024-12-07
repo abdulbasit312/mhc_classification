@@ -14,6 +14,7 @@ from transformers import AutoModel
 from argparse import ArgumentParser
 from sklearn.metrics import f1_score, precision_score, recall_score, roc_auc_score, accuracy_score
 from torch.nn import functional as F
+from tqdm import tqdm
 
 # Constants and Mappings
 id2disease = [
@@ -57,10 +58,10 @@ def mean_pooling(token_embeddings, attention_mask):
     input_mask_expanded = attention_mask.unsqueeze(-1).expand(token_embeddings.size()).float()
     return torch.sum(token_embeddings * input_mask_expanded, 1) / torch.clamp(input_mask_expanded.sum(1), min=1e-9)
 
-def get_avg_metrics(all_labels, all_probs, threshold, disease='None', setting='binary', class_names=id2disease):
+def get_avg_metrics(all_labels, all_probs, threshold, disease=None, setting='binary', class_names=id2disease):
     labels_by_class = []
     probs_by_class = []
-    if disease != 'None':
+    if disease != None:
         dis_id = id2disease.index(disease)
         if setting == 'binary':
             sel_indices = np.where(all_labels[:, dis_id] != -1)
@@ -190,6 +191,7 @@ class HierDataset(Dataset):
         self.data = []
         self.labels = []
         self.is_control = []
+        self.tweets_file_list=[]
 
         # Load data from directory structure
         for folder in os.listdir(self.input_dir):
@@ -211,43 +213,41 @@ class HierDataset(Dataset):
             for profile_folder in os.listdir(folder_path):
                 profile_path = os.path.join(folder_path, profile_folder)
                 tweets_file = os.path.join(profile_path, "tweets_preprocessed.parquet")
-                if not os.path.exists(tweets_file):
-                    continue
-
-                # Read preprocessed posts
-                df = pd.read_parquet(tweets_file)
-                posts = df["text"].tolist()[:max_posts]
-
-                # Compute `symp` scores if `use_symp` is True
-                symp = None
-                if self.use_symp:
-                    symp = read_scores(tweets_file, col_names)
-                    if symp.shape[0] > max_posts:  # Truncate to max_posts
-                        symp = symp[:max_posts, :]
-                    elif symp.shape[0] < max_posts:  # Pad with zeros if less than max_posts
-                        padding = np.zeros((max_posts - symp.shape[0], symp.shape[1]))
-                        symp = np.vstack((symp, padding))
-
-                # Tokenize posts only if tokenizer is provided
-                sample = {}
-                if self.tokenizer:
-                    tokenized = self.tokenizer(posts, truncation=True, padding='max_length', max_length=self.max_len)
-                    for k, v in tokenized.items():
-                        sample[k] = v
-
-                if symp is not None:
-                    sample["symp"] = symp  # Add symptom features to the sample
-
-                self.data.append(sample)
+                self.tweets_file_list.append(tweets_file)
                 self.labels.append(label)
 
         self.is_control = np.array(self.is_control).astype(int)
 
     def __len__(self) -> int:
-        return len(self.data)
+        return len(self.tweets_file_list)
 
     def __getitem__(self, index: int):
-        return self.data[index], self.labels[index]
+        tweets_file=self.tweets_file_list[index]
+                # Read preprocessed posts
+        df = pd.read_parquet(tweets_file)
+        posts = df["text"].tolist()[:max_posts]
+
+        # Compute `symp` scores if `use_symp` is True
+        symp = None
+        if self.use_symp:
+            symp = read_scores(tweets_file, col_names)
+            if symp.shape[0] > max_posts:  # Truncate to max_posts
+                symp = symp[:max_posts, :]
+            elif symp.shape[0] < max_posts:  # Pad with zeros if less than max_posts
+                padding = np.zeros((max_posts - symp.shape[0], symp.shape[1]))
+                symp = np.vstack((symp, padding))
+
+        # Tokenize posts only if tokenizer is provided
+        sample = {}
+        if self.tokenizer!=None:
+            tokenized = self.tokenizer(posts, truncation=True, padding='max_length', max_length=self.max_len)
+            for k, v in tokenized.items():
+                sample[k] = v
+
+        if symp is not None:
+            sample["symp"] = symp  # Add symptom features to the sample
+
+        return sample, self.labels[index]
 
 def my_collate_hier(data):
     labels = []
@@ -262,7 +262,7 @@ def my_collate_hier(data):
         processed_batch.append(user_feats)
         labels.append(label)
     labels = torch.FloatTensor(np.array(labels))
-    label_masks = torch.not_equal(labels, -1)
+    label_masks = torch.not_equal(labels, 1)
     return processed_batch, labels, label_masks
 
 # Model Definition
@@ -275,45 +275,41 @@ class SymptomStream(nn.Module):
             raise ValueError(f"`num_heads` must divide `hidden_dim` (38). Use `num_heads` as 1, 2, or 19.")
 
         # Transformer Encoder for Symptoms
-        encoder_layer = nn.TransformerEncoderLayer(
-            d_model=self.hidden_dim, dim_feedforward=self.hidden_dim, nhead=num_heads, activation='gelu'
-        )
-        self.user_encoder = nn.TransformerEncoder(encoder_layer, num_layers=num_trans_layers)
-
-        # Disease-Specific Attention Mechanisms
-        self.attn_ff = nn.ModuleList([nn.Linear(self.hidden_dim, 1) for _ in id2disease])
+        self.attn_ff_for_symp = nn.ModuleList([nn.Linear(38, 1) for disease in id2disease])
 
         self.dropout = nn.Dropout(0.1)
-        self.clf = nn.ModuleList([nn.Linear(self.hidden_dim, 1) for _ in id2disease])
+        self.clf = nn.ModuleList([nn.Linear(38, 1) for _ in id2disease])
 
     def forward(self, batch, **kwargs):
-        feats = []
-        attn_scores = []
+        symp_feats = []  # List to store per-user symptom features
+        symp_attn_scores = []  # List to store per-user attention scores
+
         for user_feats in batch:
             # Symptom features
-            x = user_feats["symp"].to(next(self.parameters()).device)  # Shape: [num_posts, hidden_dim]
-            x = self.user_encoder(x)  # Apply Transformer
-
             # Compute disease-specific attention
-            disease_attn_scores = []
-            disease_feats = []
-            for i, disease_attn in enumerate(self.attn_ff):
-                attn_score = torch.softmax(disease_attn(x).squeeze(), -1)  # Disease-specific attention over posts
-                feat = self.dropout(attn_score @ x)  # Weighted sum of features
-                disease_attn_scores.append(attn_score)
-                disease_feats.append(feat)
+            symp_attn_score = [
+                torch.softmax(attn_ff(user_feats["symp"]).squeeze(-1), dim=-1)  # Compute softmax over the last dimension
+                for attn_ff in self.attn_ff_for_symp
+            ]
+            symp_feat = [self.dropout(score @ user_feats["symp"]) for score in symp_attn_score]  # Weighted sum
 
-            feats.append(disease_feats)
-            attn_scores.append(disease_attn_scores)
+            # Append results
+            symp_feats.append(torch.stack(symp_feat, dim=0))  # Stack symp_feat across diseases
+            symp_attn_scores.append(torch.stack(symp_attn_score, dim=0))  # Stack scores across diseases
+
+        # Convert lists to tensors
+        symp_feats = torch.stack(symp_feats, dim=0)  # Shape: [batch_size, num_diseases, hidden_dim]
+        symp_attn_scores = torch.stack(symp_attn_scores, dim=0)  # Shape: [batch_size, num_diseases, max_posts]
 
         logits = []
         for i in range(len(id2disease)):
-            tmp = torch.stack([feats[j][i] for j in range(len(feats))])  # Stack features for each disease
-            logit = self.clf[i](tmp)
+            tmp_symp = symp_feats[:, i, :]  # Select features for the i-th disease
+            logit = self.clf[i](tmp_symp)
             logits.append(logit)
 
-        logits = torch.stack(logits, dim=0).transpose(0, 1).squeeze()
-        return logits, attn_scores
+        logits = torch.cat(logits, dim=1)  # Concatenate logits for all diseases: [batch_size, num_diseases]
+        return logits, symp_attn_scores
+
 
 # Training and Evaluation Code
 def train_model(model, train_loader, val_loader, criterion, optimizer, num_epochs, device, threshold=0.5, disease='None', setting='binary'):
@@ -322,7 +318,7 @@ def train_model(model, train_loader, val_loader, criterion, optimizer, num_epoch
     for epoch in range(num_epochs):
         model.train()
         total_loss = 0.0
-        for batch in train_loader:
+        for batch in tqdm(train_loader):
             x, y, label_masks = batch
             x = [{k: v.to(device) for k, v in user_feats.items()} for user_feats in x]
             y = y.to(device)
@@ -335,10 +331,10 @@ def train_model(model, train_loader, val_loader, criterion, optimizer, num_epoch
             optimizer.step()
 
             total_loss += loss.item()
-
+            
         avg_train_loss = total_loss / len(train_loader)
         print(f"Epoch [{epoch+1}/{num_epochs}], Training Loss: {avg_train_loss:.4f}")
-
+        
         # Validation
         model.eval()
         total_val_loss = 0.0
@@ -360,6 +356,7 @@ def train_model(model, train_loader, val_loader, criterion, optimizer, num_epoch
                     probs = probs.unsqueeze(0)  # Ensure 2D
                 all_labels.append(y.cpu().numpy())
                 all_probs.append(probs.cpu().numpy())
+                
 
         all_labels = np.concatenate(all_labels)
         all_probs = np.concatenate(all_probs)
@@ -407,14 +404,14 @@ def test_model(model, test_loader, criterion, device, threshold=0.5, disease='No
 # Main Execution
 if __name__ == "__main__":
     # Hyperparameters and configurations
-    input_dir = "/w/247/baileyng/mental_dataset_split_compressed" 
+    input_dir = "/w/247/abdulbasit/mental_health_dataset_split" 
     batch_size = 4
     max_len = 280
     max_posts = 64
     epochs = 5
     learning_rate = 1e-4
     control_ratio = 0.5
-    disease = 'anxiety'  # Use 'None' for all diseases or specify one like 'anxiety'
+    disease = None  # Use 'None' for all diseases or specify one like 'anxiety'
     setting = 'binary'
     use_symp = True  # Only use symptom features
     bal_sample = False  # Set to True if you want to use BalanceSampler
