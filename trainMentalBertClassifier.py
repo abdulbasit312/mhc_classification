@@ -108,7 +108,7 @@ for split in ["train"]:
                     results.append(scores)
                 results = torch.tensor([list(result.values()) for result in results], requires_grad=False).to(device)
 
-                logits = classifier.classify(tweets[:16])
+                logits = classifier.classify(texts[:16])
                 logits.requires_grad = True
 
                 loss = torch.nn.functional.mse_loss(logits, results)
