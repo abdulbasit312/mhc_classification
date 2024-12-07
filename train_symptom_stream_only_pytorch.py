@@ -373,11 +373,11 @@ def train_model(model, train_loader, val_loader, criterion, optimizer, num_epoch
 
 def test_model(model, test_loader, criterion, device, threshold=0.5, disease='None', setting='binary'):
     model.eval()
-    total_test_loss = 0.0
+    total_test_loss = 0.0  # Initialize the test loss variable
     all_labels = []
     all_probs = []
     with torch.no_grad():
-        for batch in val_loader:  # or test_loader
+        for batch in test_loader:  # Corrected from `val_loader` to `test_loader`
             x, y, label_masks = batch
             x = [{k: v.to(device) for k, v in user_feats.items()} for user_feats in x]
             y = y.to(device)
@@ -385,7 +385,7 @@ def test_model(model, test_loader, criterion, device, threshold=0.5, disease='No
 
             y_hat, attn_scores = model(x)
             loss = criterion(y_hat, y, label_masks)
-            total_val_loss += loss.item()
+            total_test_loss += loss.item()  # Add loss to the total test loss
 
             probs = torch.sigmoid(y_hat)
             if probs.dim() == 1:
