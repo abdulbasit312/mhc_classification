@@ -281,34 +281,28 @@ class SymptomStream(nn.Module):
         self.clf = nn.ModuleList([nn.Linear(38, 1) for _ in id2disease])
 
     def forward(self, batch, **kwargs):
-        symp_feats = []  # List to store per-user symptom features
-        symp_attn_scores = []  # List to store per-user attention scores
+    # Extract symptom tensors from batch and stack into a single tensor
+        symp_tensor = torch.stack([user_feats["symp"] for user_feats in batch], dim=0)  # Shape: [batch_size, max_posts, hidden_dim]
 
-        for user_feats in batch:
-            # Symptom features
-            # Compute disease-specific attention
-            symp_attn_score = [
-                torch.softmax(attn_ff(user_feats["symp"]).squeeze(-1), dim=-1)  # Compute softmax over the last dimension
-                for attn_ff in self.attn_ff_for_symp
-            ]
-            symp_feat = [self.dropout(score @ user_feats["symp"]) for score in symp_attn_score]  # Weighted sum
+        # Compute disease-specific attention scores for all diseases in parallel
+        attn_scores = torch.stack([
+            torch.softmax(attn_ff(symp_tensor).squeeze(-1), dim=-1)  # Shape: [batch_size, max_posts]
+            for attn_ff in self.attn_ff_for_symp
+        ], dim=1)  # Shape: [batch_size, num_diseases, max_posts]
 
-            # Append results
-            symp_feats.append(torch.stack(symp_feat, dim=0))  # Stack symp_feat across diseases
-            symp_attn_scores.append(torch.stack(symp_attn_score, dim=0))  # Stack scores across diseases
+        # Compute weighted features using attention scores
+        symp_feats = torch.einsum('bnp,bpd->bnd', attn_scores, symp_tensor)  # Shape: [batch_size, num_diseases, hidden_dim]
 
-        # Convert lists to tensors
-        symp_feats = torch.stack(symp_feats, dim=0)  # Shape: [batch_size, num_diseases, hidden_dim]
-        symp_attn_scores = torch.stack(symp_attn_scores, dim=0)  # Shape: [batch_size, num_diseases, max_posts]
+        # Apply dropout
+        symp_feats = self.dropout(symp_feats)
 
-        logits = []
-        for i in range(len(id2disease)):
-            tmp_symp = symp_feats[:, i, :]  # Select features for the i-th disease
-            logit = self.clf[i](tmp_symp)
-            logits.append(logit)
+        # Compute logits for all diseases in parallel
+        logits = torch.cat([
+            clf(symp_feats[:, i, :]) for i, clf in enumerate(self.clf)
+        ], dim=1)  # Shape: [batch_size, num_diseases]
 
-        logits = torch.cat(logits, dim=1)  # Concatenate logits for all diseases: [batch_size, num_diseases]
-        return logits, symp_attn_scores
+        return logits, attn_scores
+
 
 
 # Training and Evaluation Code
@@ -458,7 +452,7 @@ if __name__ == "__main__":
         sampler = BalanceSampler(train_dataset, control_ratio)
         train_loader = DataLoader(train_dataset, batch_size=batch_size, collate_fn=my_collate_hier, sampler=sampler, num_workers=0)
     else:
-        train_loader = DataLoader(train_dataset, batch_size=batch_size, collate_fn=my_collate_hier, shuffle=True, num_workers=0)
+        train_loader = DataLoader(train_dataset, batch_size=batch_size, collate_fn=my_collate_hier, shuffle=True, num_workers=4)
 
     val_loader = DataLoader(val_dataset, batch_size=batch_size, collate_fn=my_collate_hier, shuffle=False, num_workers=0)
     test_loader = DataLoader(test_dataset, batch_size=batch_size, collate_fn=my_collate_hier, shuffle=False, num_workers=0)
