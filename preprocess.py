@@ -66,9 +66,8 @@ symptoms = [
 
 
 warnings.filterwarnings("ignore", category=UserWarning, module="torch.utils.data.dataloader")
-device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-model_name = "bert-base-uncased"
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+model_name = "bert-base-uncased"
 classifier = mentalBertClassifier(model_name, device)
 state_dict_path = "mentalBertClassifier.pth"
 classifier.load_state_dict(torch.load(state_dict_path, map_location=device))
@@ -77,48 +76,44 @@ classifier.eval()
 topK = 16
 batch_size = 32
 
-base_path = "processed"
-for split in ["train", "test", "val"]:
-    for disease in id2disease:
-        disease_dir = os.path.join(base_path, split, disease)
-        for user_dir in os.listdir(disease_dir):
-            start_time = time.time()
-            user_path = os.path.join(disease_dir, user_dir)
-            tweets_file = os.path.join(user_path, 'tweets.json')
-            if os.path.isfile(tweets_file):
-                with open(tweets_file, 'r') as file:
-                    data = json.load(file)
+base_path = "../../abdulbasit"
+for disease in id2disease:
+    disease_dir = os.path.join(base_path, disease)
+    start_time = time.time()
+    for user_dir in os.listdir(disease_dir):
+        user_path = os.path.join(disease_dir, user_dir)
+        tweets_file = os.path.join(user_path, 'compressed.json')
+        if os.path.isfile(tweets_file):
+            with open(tweets_file, 'r') as file:
+                data = json.load(file)
 
-                tweets = []
-                for date, tweet_list in data.items():
-                    for tweet in tweet_list:
-                        tweets.append(tweet)
+            tweets = []
+            for tweet in data:
+                tweets.append(tweet)
 
-                df = pd.DataFrame(tweets)
-                texts = df['text'].tolist()
+            df = pd.DataFrame(tweets)
+            texts = df['text'].tolist()
 
-                logits = classifier.classify(texts)
-                
-                max_allocated_memory = torch.cuda.max_memory_allocated(device)
-                print(f"Processed {len(texts)} texts in {time.time() - start_time:.2f} seconds, max memory allocated: {max_allocated_memory / 1024 / 1024:.2f} MB")
-                
-                results = []
-                for logit in logits:
-                    result = {symptom: logit[i] for i, symptom in enumerate(symptoms)}
-                    results.append(result)
-
-                results_df = pd.DataFrame(results)
-                df = pd.concat([df, results_df], axis=1)
-                results_df['sum'] = results_df.sum(axis=1)
-                df['isTopK'] = results_df['sum'].rank(method='first', ascending=False) <= topK
-
-                output_path = os.path.join(user_path, 'tweets_preprocessed.parquet')
-                df.to_parquet(output_path)
+            logits = classifier.classify(texts)
             
-            exit()
-                   
+            results = []
+            for logit in logits:
+                result = {symptom: logit[i].item() for i, symptom in enumerate(symptoms)}
+                results.append(result)
+
+            results_df = pd.DataFrame(results)
+            df = pd.concat([df, results_df], axis=1)
+            results_df['sum'] = results_df.sum(axis=1)
+            df[f'isTop{topK}'] = results_df['sum'].rank(method='first', ascending=False) <= topK
+
+            output_path = os.path.join(user_path, 'tweets_preprocessed.parquet')
+            df.to_parquet(output_path)
             
+    print(f"Processed {disease_dir} in {time.time() - start_time} seconds using {torch.cuda.max_memory_allocated(device) / 1024 / 1024:.2f} MB")
         
+                
+        
+    
 
 
     
