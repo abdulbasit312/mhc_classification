@@ -374,6 +374,7 @@ def train_model(model, train_loader, val_loader, criterion, optimizer, num_epoch
             optimizer.step()
 
             total_loss += loss.item()
+        
             
         avg_train_loss = total_loss / len(train_loader)
         torch.save(model.state_dict(),f"model_{epoch+1}.pth")
