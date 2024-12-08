@@ -12,10 +12,10 @@ from cv2 import log
 from torch import nn, optim
 from transformers import AutoModel
 from argparse import ArgumentParser
-from sklearn.metrics import f1_score, precision_score, recall_score, roc_auc_score, accuracy_score
+from sklearn.metrics import f1_score, precision_score, recall_score, roc_auc_score, accuracy_score,classification_report
 from torch.nn import functional as F
 from tqdm import tqdm
-
+from sklearn.utils.class_weight import compute_class_weight
 # Constants and Mappings
 id2disease = [
     "adhd",
@@ -25,10 +25,11 @@ id2disease = [
     "mdd",
     "ocd",
     "ppd",
-    "ptsd"
+    "ptsd",
+    "neg"
 ]
 disease2id = {disease: id for id, disease in enumerate(id2disease)}
-
+train_class_weight=[]
 col_names = ['Do things easily get painful consequences', 'Worthlessness and guilty',
        'Diminished emotional expression', 'Drastical shift in mood and energy',
        'Avoidance of stimuli', 'Indecisiveness',
@@ -53,70 +54,21 @@ def read_scores(path, col_names):
     df = pd.read_parquet(path)
     matrix = df[col_names].to_numpy()
     return matrix
+def read_top_k(path,col_names,k):
+    df = pd.read_parquet(path)
+    df['sum'] = df[col_names].sum(axis=1)
+    # Sort by the new column and get the top k rows
+    top_k_rows = df.nlargest(k, 'sum')["text"].tolist()
+    return top_k_rows
 
 def mean_pooling(token_embeddings, attention_mask):
     input_mask_expanded = attention_mask.unsqueeze(-1).expand(token_embeddings.size()).float()
     return torch.sum(token_embeddings * input_mask_expanded, 1) / torch.clamp(input_mask_expanded.sum(1), min=1e-9)
 
 def get_avg_metrics(all_labels, all_probs, threshold, disease=None, setting='binary', class_names=id2disease):
-    labels_by_class = []
-    probs_by_class = []
-    if disease != None:
-        dis_id = id2disease.index(disease)
-        if setting == 'binary':
-            sel_indices = np.where(all_labels[:, dis_id] != -1)
-            labels = all_labels[:, dis_id][sel_indices]
-            probs = all_probs[:, dis_id][sel_indices]
-        else:
-            labels = all_labels[:, dis_id]
-            probs = all_probs[:, dis_id]
-        ret = {}
-        preds = (probs > threshold).astype(float)
-        ret["macro_acc"]=np.mean(labels == preds)
-        ret["macro_p"]=precision_score(labels, preds)
-        ret["macro_r"]=recall_score(labels, preds)
-        ret["macro_f1"]=f1_score(labels, preds)
-        try:
-            ret["macro_auc"]=roc_auc_score(labels, probs)
-        except:
-            ret["macro_auc"]=0.5
-    else:
-        for i in range(all_labels.shape[1]):
-            if setting == 'binary':
-                sel_indices = np.where(all_labels[:, i] != -1)
-                labels_by_class.append(all_labels[:, i][sel_indices])
-                probs_by_class.append(all_probs[:, i][sel_indices])
-            else:
-                labels_by_class.append(all_labels[:, i])
-                probs_by_class.append(all_probs[:, i])
-        # macro avg metrics
-        ret = {}
-        for k in ["macro_acc", "macro_p", "macro_r", "macro_f1", "macro_auc"]:
-            ret[k] = []
-        for labels, probs in zip(labels_by_class, probs_by_class):
-            preds = (probs > threshold).astype(float)
-            ret["macro_acc"].append(np.mean(labels == preds))
-            ret["macro_p"].append(precision_score(labels, preds))
-            ret["macro_r"].append(recall_score(labels, preds))
-            ret["macro_f1"].append(f1_score(labels, preds))
-            try:
-                ret["macro_auc"].append(roc_auc_score(labels, probs))
-            except:
-                ret["macro_auc"].append(0.5)
-        for k in ["macro_acc", "macro_p", "macro_r", "macro_f1", "macro_auc"]:
-            # list of diseases
-            for class_name, v in zip(class_names, ret[k]):
-                ret[class_name+"_"+k[6:]] = v
-            ret[k] = np.mean(ret[k])
-
-        if setting != 'binary':
-            all_preds = (all_probs > threshold).astype(float)
-            ret["micro_p"] = precision_score(all_labels.flatten(), all_preds.flatten())
-            ret["micro_r"] = recall_score(all_labels.flatten(), all_preds.flatten())
-            ret["micro_f1"] = f1_score(all_labels.flatten(), all_preds.flatten())
-            ret["sample_acc"] = accuracy_score(all_labels, all_preds)
-
-    return ret
+    predicted=np.argmax(all_probs,axis=1)
+    print(f"Accuracy: {accuracy_score(all_labels,predicted)} \n")
+    print(classification_report(all_labels,predicted,labels=list(disease2id.values()),target_names=id2disease))
 
 def masked_logits_loss(logits, labels, masks=None):
     # Align shapes
@@ -151,9 +103,11 @@ def compute_cross_entropy(predictions, targets, class_weights=None, with_logits=
     Returns:
         torch.Tensor: Cross entropy loss (scalar).
     """
+    class_weights=torch.tensor(class_weights,device=predictions.device,dtype=torch.float)
     if with_logits:
         # Use `F.cross_entropy` if predictions are raw logits
-        loss = F.cross_entropy(predictions, targets, weight=class_weights)
+
+        loss = F.cross_entropy(predictions, targets,weight=class_weights)
     else:
         # Use `F.nll_loss` if predictions are log-softmax probabilities
         loss = F.nll_loss(predictions, targets, weight=class_weights)
@@ -226,15 +180,10 @@ class HierDataset(Dataset):
             if not os.path.isdir(folder_path):
                 continue
 
-            label = np.zeros(len(id2disease), dtype=int)
-            if folder == "neg":
-                self.is_control.append(1)
+            if folder in disease2id:
+                label=disease2id[folder] 
             else:
-                self.is_control.append(0)
-                if folder in disease2id:
-                    label[disease2id[folder]] = 1
-                else:
-                    continue
+                label=disease2id["neg"]
 
             # Inside HierDataset class
             for profile_folder in os.listdir(folder_path):
@@ -242,7 +191,9 @@ class HierDataset(Dataset):
                 tweets_file = os.path.join(profile_path, "tweets_preprocessed.parquet")
                 self.tweets_file_list.append(tweets_file)
                 self.labels.append(label)
-
+        if(split=="train"):
+            global train_class_weight
+            train_class_weight=compute_class_weight(class_weight="balanced",classes=np.unique(self.labels),y=self.labels)
         self.is_control = np.array(self.is_control).astype(int)
 
     def __len__(self) -> int:
@@ -267,7 +218,8 @@ class HierDataset(Dataset):
         # Tokenize posts only if tokenizer is provided
         sample = {}
         if self.tokenizer!=None:
-            tokenized = self.tokenizer(posts, truncation=True, padding='max_length', max_length=self.max_len)
+            top_k_posts=read_top_k(tweets_file,col_names,25)
+            tokenized = self.tokenizer(top_k_posts, truncation=True, padding='max_length', max_length=self.max_len,return_tensors="pt")
             for k, v in tokenized.items():
                 sample[k] = v
 
@@ -288,7 +240,7 @@ def my_collate_hier(data):
                 user_feats[k] = torch.FloatTensor(v)
         processed_batch.append(user_feats)
         labels.append(label)
-    labels = torch.FloatTensor(np.array(labels))
+    labels = torch.tensor(labels,dtype=torch.int64)
     label_masks = torch.not_equal(labels, -1)
     return processed_batch, labels, label_masks
 
@@ -305,7 +257,7 @@ class SymptomStream(nn.Module):
         self.attn_ff_for_symp = nn.ModuleList([nn.Linear(38, 1) for disease in id2disease])
 
         self.dropout = nn.Dropout(0.1)
-        self.clf = nn.ModuleList([nn.Linear(38, 1) for _ in id2disease])
+        self.clf = nn.Linear(342,len(id2disease))
 
     def forward(self, batch, **kwargs):
     # Extract symptom tensors from batch and stack into a single tensor
@@ -322,14 +274,84 @@ class SymptomStream(nn.Module):
 
         # Apply dropout
         symp_feats = self.dropout(symp_feats)
-
+        symp_feats=symp_feats.reshape(symp_feats.shape[0],-1)
         # Compute logits for all diseases in parallel
-        logits = torch.cat([
+        '''logits = torch.cat([
             clf(symp_feats[:, i, :]) for i, clf in enumerate(self.clf)
-        ], dim=1)  # Shape: [batch_size, num_diseases]
+        ], dim=1)  # Shape: [batch_size, num_diseases]'''
+        logits=self.clf(symp_feats)
+
+        return logits, attn_scores
+class PsyEx_wo_symp(nn.Module):
+    def __init__(self, model_type, num_heads=4, num_trans_layers=2, max_posts=25, freeze=True, pool_type="first") -> None:
+        super().__init__()
+        self.model_type = model_type
+        self.num_heads = num_heads
+        self.num_trans_layers = num_trans_layers
+        self.pool_type = pool_type
+        self.post_encoder = AutoModel.from_pretrained(model_type,torch_dtype=torch.float16).to(device)
+        if freeze:
+            for name, param in self.post_encoder.named_parameters():
+                param.requires_grad = False
+        self.hidden_dim = self.post_encoder.config.hidden_size
+        self.max_posts = max_posts
+        self.pos_emb = nn.Parameter(torch.Tensor(max_posts, self.hidden_dim))
+        nn.init.xavier_uniform_(self.pos_emb)
+        encoder_layer = nn.TransformerEncoderLayer(d_model=self.hidden_dim, dim_feedforward=self.hidden_dim, nhead=num_heads, activation='gelu',batch_first=True)
+        self.user_encoder = nn.TransformerEncoder(encoder_layer, num_layers=num_trans_layers)
+        self.attn_ff = nn.Linear(self.hidden_dim, 1)
+        self.dropout = nn.Dropout(0.5)#self.post_encoder.config.hidden_dropout_prob)
+        self.clf = nn.Linear(self.hidden_dim, len(disease2id))
+    
+    def forward(self, batch, **kwargs):
+        # Extract and process tokenized tweets
+        input_ids = torch.stack([user_feats["input_ids"] for user_feats in batch], dim=0)  # Shape: [batch_size, num_posts, seq_len]
+        attention_mask = torch.stack([user_feats["attention_mask"] for user_feats in batch], dim=0)  # Shape: [batch_size, num_posts, seq_len]
+        #token_type_ids = torch.stack([user_feats["token_type_ids"] for user_feats in batch], dim=0)  # Shape: [batch_size, num_posts, seq_len]
+
+        batch_size, num_posts, seq_len = input_ids.shape
+
+        # Flatten posts for processing through the encoder
+        flat_input_ids = input_ids.view(-1, seq_len)  # Shape: [batch_size * num_posts, seq_len]
+        flat_attention_mask = attention_mask.view(-1, seq_len)  # Shape: [batch_size * num_posts, seq_len]
+        #flat_token_type_ids = token_type_ids.view(-1, seq_len)  # Shape: [batch_size * num_posts, seq_len]
+
+        # Process through post encoder
+        self.post_encoder.eval()
+        post_outputs = self.post_encoder(flat_input_ids, flat_attention_mask )#flat_token_type_ids)
+        last_hidden_state = post_outputs.last_hidden_state  # Shape: [batch_size * num_posts, seq_len, hidden_size]
+
+        # Pooling (first or mean)
+        if self.pool_type == "first":
+            x = last_hidden_state[:, 0:1, :]  # Shape: [batch_size * num_posts, 1, hidden_size]
+        elif self.pool_type == 'mean':
+            x = mean_pooling(last_hidden_state, flat_attention_mask).unsqueeze(1)  # Shape: [batch_size * num_posts, 1, hidden_size]
+
+        # Reshape back to [batch_size, num_posts, hidden_size]
+        x = x.view(batch_size, num_posts, self.hidden_dim)
+
+        # Add positional embeddings
+        pos_emb = self.pos_emb[:num_posts, :].unsqueeze(0)  # Shape: [1, num_posts, hidden_size]
+        x = x + pos_emb
+
+        # Process through user encoder
+        x = self.user_encoder(x)  # Shape: [batch_size, num_posts, hidden_size]
+
+        # Compute attention scores for all diseases
+        attn_scores = torch.softmax(self.attn_ff(x).squeeze(-1), dim=1)   # Shape: [batch_size, num_diseases, num_posts]
+
+        # Compute weighted features for all diseases
+        attn_embedding=torch.bmm(attn_scores.unsqueeze(1),x).squeeze(1)
+        # Apply dropout
+
+        # Compute logits for all diseases
+        logits = self.clf(attn_embedding)
 
         return logits, attn_scores
 
+def mean_pooling(token_embeddings, attention_mask):
+    input_mask_expanded = attention_mask.unsqueeze(-1).expand(token_embeddings.size()).float()
+    return torch.sum(token_embeddings * input_mask_expanded, 1) / torch.clamp(input_mask_expanded.sum(1), min=1e-9)
 
 
 # Training and Evaluation Code
@@ -347,7 +369,7 @@ def train_model(model, train_loader, val_loader, criterion, optimizer, num_epoch
 
             optimizer.zero_grad()
             y_hat, attn_scores = model(x)
-            loss = criterion(y_hat, y, label_masks)
+            loss = criterion(y_hat, y,train_class_weight)
             loss.backward()
             optimizer.step()
 
@@ -369,10 +391,10 @@ def train_model(model, train_loader, val_loader, criterion, optimizer, num_epoch
                 label_masks = label_masks.to(device)
 
                 y_hat, attn_scores = model(x)
-                loss = criterion(y_hat, y, label_masks)
+                loss = criterion(y_hat, y, train_class_weight)
                 total_val_loss += loss.item()
 
-                probs = torch.sigmoid(y_hat)
+                probs = F.softmax(y_hat,dim=-1)
                 if probs.dim() == 1:
                     probs = probs.unsqueeze(0)  # Ensure 2D
                 all_labels.append(y.cpu().numpy())
@@ -382,15 +404,8 @@ def train_model(model, train_loader, val_loader, criterion, optimizer, num_epoch
         all_labels = np.concatenate(all_labels)
         all_probs = np.concatenate(all_probs)
         avg_val_loss = total_val_loss / len(val_loader)
-        ret = get_avg_metrics(all_labels, all_probs, threshold, disease, setting)
+        get_avg_metrics(all_labels, all_probs, threshold, disease, setting)
         print(f"Validation Loss: {avg_val_loss:.4f}")
-        print(f"Validation Metrics: {ret}")
-
-        if ret['macro_f1'] > best_f1:
-            best_f1 = ret['macro_f1']
-            # You can save the model here if needed
-            # torch.save(model.state_dict(), 'best_model.pth')
-        print(f"Best F1 so far: {best_f1:.4f}")
 
 def test_model(model, test_loader, criterion, device, threshold=0.5, disease='None', setting='binary'):
     model.eval()
@@ -405,7 +420,7 @@ def test_model(model, test_loader, criterion, device, threshold=0.5, disease='No
             label_masks = label_masks.to(device)
 
             y_hat, attn_scores = model(x)
-            loss = criterion(y_hat, y, label_masks)
+            loss = criterion(y_hat, y, [train_class_weight[i] for i in range(len(id2disease))])
             total_test_loss += loss.item()  # Add loss to the total test loss
 
             probs = torch.sigmoid(y_hat)
@@ -429,21 +444,23 @@ if __name__ == "__main__":
     batch_size = 4
     max_len = 280
     max_posts = 500
-    epochs = 5
-    learning_rate = 1e-4
+    epochs = 50
+    learning_rate = 1e-3
     control_ratio = 0.5
     disease = None  # Use 'None' for all diseases or specify one like 'anxiety'
     setting = 'binary'
     use_symp = True  # Only use symptom features
     bal_sample = False  # Set to True if you want to use BalanceSampler
     threshold = 0.5  # Threshold for classification
-
+    #model_type="mental/mental-bert-base-uncased"
+    model_type="distilbert-base-uncased"
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    tokenizer = AutoTokenizer.from_pretrained(model_type)
 
     # Instantiate datasets
     train_dataset = HierDataset(
         input_dir=input_dir,
-        tokenizer=None,  # No tokenizer needed for symptom-only model
+        tokenizer=tokenizer,  # No tokenizer needed for symptom-only model
         max_len=max_len,
         split="train",
         disease=disease,
@@ -454,7 +471,7 @@ if __name__ == "__main__":
 
     val_dataset = HierDataset(
         input_dir=input_dir,
-        tokenizer=None,  # No tokenizer needed for symptom-only model
+        tokenizer=tokenizer,  # No tokenizer needed for symptom-only model
         max_len=max_len,
         split="val",
         disease=disease,
@@ -485,16 +502,23 @@ if __name__ == "__main__":
     test_loader = DataLoader(test_dataset, batch_size=batch_size, collate_fn=my_collate_hier, shuffle=False, num_workers=2)
 
     # Instantiate the model
-    model = SymptomStream(
+    '''model = SymptomStream(
         num_heads=2,  # Use 1, 2, or 19 for symptom stream
         num_trans_layers=6,
         max_posts=max_posts
-    ).to(device)
+    ).to(device)'''
+   
+    model=PsyEx_wo_symp(model_type).to(device=device)
 
+    # Example of target with class indices
+ 
+    # Example of target with class probabilities
     # Define optimizer and loss function
     optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate)
-    criterion = masked_logits_loss
-
+    criterion = compute_cross_entropy
+    # Print learnable parameters
+    total_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    print(f"Total Learnable Parameters: {total_params}")
     # Train the model
     train_model(
         model=model,
