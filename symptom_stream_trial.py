@@ -105,7 +105,7 @@ def compute_cross_entropy(predictions, targets, class_weights=None, with_logits=
     """
     class_weights=torch.tensor(class_weights,device=predictions.device,dtype=torch.float)
     if with_logits:
-        # Use `F.cross_entropy` if predictions are raw logits
+        # Use `F.cross_entropy` if predictions are raw logits [bs,9]->[] [bs]->1,2,3,0
 
         loss = F.cross_entropy(predictions, targets,weight=class_weights)
     else:
@@ -289,7 +289,7 @@ class PsyEx_wo_symp(nn.Module):
         self.num_heads = num_heads
         self.num_trans_layers = num_trans_layers
         self.pool_type = pool_type
-        self.post_encoder = AutoModel.from_pretrained(model_type,torch_dtype=torch.float16).to(device)
+        self.post_encoder = AutoModel.from_pretrained(model_type).to(device)
         if freeze:
             for name, param in self.post_encoder.named_parameters():
                 param.requires_grad = False
@@ -300,25 +300,25 @@ class PsyEx_wo_symp(nn.Module):
         encoder_layer = nn.TransformerEncoderLayer(d_model=self.hidden_dim, dim_feedforward=self.hidden_dim, nhead=num_heads, activation='gelu',batch_first=True)
         self.user_encoder = nn.TransformerEncoder(encoder_layer, num_layers=num_trans_layers)
         self.attn_ff = nn.Linear(self.hidden_dim, 1)
-        self.dropout = nn.Dropout(0.5)#self.post_encoder.config.hidden_dropout_prob)
+        self.dropout = nn.Dropout(self.post_encoder.config.hidden_dropout_prob)
         self.clf = nn.Linear(self.hidden_dim, len(disease2id))
     
     def forward(self, batch, **kwargs):
         # Extract and process tokenized tweets
         input_ids = torch.stack([user_feats["input_ids"] for user_feats in batch], dim=0)  # Shape: [batch_size, num_posts, seq_len]
         attention_mask = torch.stack([user_feats["attention_mask"] for user_feats in batch], dim=0)  # Shape: [batch_size, num_posts, seq_len]
-        #token_type_ids = torch.stack([user_feats["token_type_ids"] for user_feats in batch], dim=0)  # Shape: [batch_size, num_posts, seq_len]
+        token_type_ids = torch.stack([user_feats["token_type_ids"] for user_feats in batch], dim=0)  # Shape: [batch_size, num_posts, seq_len]
 
         batch_size, num_posts, seq_len = input_ids.shape
 
         # Flatten posts for processing through the encoder
         flat_input_ids = input_ids.view(-1, seq_len)  # Shape: [batch_size * num_posts, seq_len]
         flat_attention_mask = attention_mask.view(-1, seq_len)  # Shape: [batch_size * num_posts, seq_len]
-        #flat_token_type_ids = token_type_ids.view(-1, seq_len)  # Shape: [batch_size * num_posts, seq_len]
+        flat_token_type_ids = token_type_ids.view(-1, seq_len)  # Shape: [batch_size * num_posts, seq_len]
 
         # Process through post encoder
         self.post_encoder.eval()
-        post_outputs = self.post_encoder(flat_input_ids, flat_attention_mask )#flat_token_type_ids)
+        post_outputs = self.post_encoder(flat_input_ids, flat_attention_mask ,flat_token_type_ids)
         last_hidden_state = post_outputs.last_hidden_state  # Shape: [batch_size * num_posts, seq_len, hidden_size]
 
         # Pooling (first or mean)
@@ -376,6 +376,7 @@ def train_model(model, train_loader, val_loader, criterion, optimizer, num_epoch
             total_loss += loss.item()
             
         avg_train_loss = total_loss / len(train_loader)
+        torch.save(model.state_dict(),f"model_{epoch+1}.pth")
         print(f"Epoch [{epoch+1}/{num_epochs}], Training Loss: {avg_train_loss:.4f}")
         
         # Validation
@@ -452,8 +453,8 @@ if __name__ == "__main__":
     use_symp = True  # Only use symptom features
     bal_sample = False  # Set to True if you want to use BalanceSampler
     threshold = 0.5  # Threshold for classification
-    #model_type="mental/mental-bert-base-uncased"
-    model_type="distilbert-base-uncased"
+    model_type="mental/mental-bert-base-uncased"
+    #model_type="distilbert-base-uncased"
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     tokenizer = AutoTokenizer.from_pretrained(model_type)
 
