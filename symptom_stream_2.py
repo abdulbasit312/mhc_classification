@@ -28,6 +28,8 @@ id2disease = [
     "ptsd",
     "neg"
 ]
+
+
 disease2id = {disease: id for id, disease in enumerate(id2disease)}
 train_class_weight=[]
 col_names = ['Do things easily get painful consequences', 'Worthlessness and guilty',
@@ -187,7 +189,7 @@ class HierDataset(Dataset):
             # Inside HierDataset class
             for profile_folder in os.listdir(folder_path):
                 profile_path = os.path.join(folder_path, profile_folder)
-                tweets_file = os.path.join(profile_path, "tweets_preprocessed.parquet")
+                tweets_file = os.path.join(profile_path, "tweets_preprocessed_2.parquet")
                 self.tweets_file_list.append(tweets_file)
                 self.labels.append(label)
         if(split=="train"):
@@ -217,7 +219,7 @@ class HierDataset(Dataset):
         # Tokenize posts only if tokenizer is provided
         sample = {}
         if self.tokenizer!=None:
-            top_k_posts=read_top_k(tweets_file,col_names,25)
+            top_k_posts=read_top_k(tweets_file,col_names,15)
             tokenized = self.tokenizer(top_k_posts, truncation=True, padding='max_length', max_length=self.max_len,return_tensors="pt")
             for k, v in tokenized.items():
                 sample[k] = v
@@ -281,9 +283,8 @@ class SymptomStream(nn.Module):
         logits=self.clf(symp_feats)
 
         return logits, attn_scores
-#4,2
 class PsyEx_wo_symp(nn.Module):
-    def __init__(self, model_type, num_heads=4, num_trans_layers=2, max_posts=25, freeze=True, pool_type="first") -> None:
+    def __init__(self, model_type, num_heads=1, num_trans_layers=1, max_posts=15, freeze=True, pool_type="first") -> None:
         super().__init__()
         self.model_type = model_type
         self.num_heads = num_heads
@@ -299,9 +300,10 @@ class PsyEx_wo_symp(nn.Module):
         nn.init.xavier_uniform_(self.pos_emb)
         encoder_layer = nn.TransformerEncoderLayer(d_model=self.hidden_dim, dim_feedforward=self.hidden_dim, nhead=num_heads, activation='gelu',batch_first=True)
         self.user_encoder = nn.TransformerEncoder(encoder_layer, num_layers=num_trans_layers)
-        self.attn_ff = nn.Linear(self.hidden_dim, 1)
+        self.projection_layer = nn.Linear(self.hidden_dim, 200)
+        self.activation=nn.GELU()
         self.dropout = nn.Dropout(self.post_encoder.config.hidden_dropout_prob)
-        self.clf = nn.Linear(self.hidden_dim, len(disease2id))
+        self.clf = nn.Linear(200, len(disease2id))
     
     def forward(self, batch, **kwargs):
         # Extract and process tokenized tweets
@@ -323,7 +325,7 @@ class PsyEx_wo_symp(nn.Module):
 
         # Pooling (first or mean)
         if self.pool_type == "first":
-            x = last_hidden_state[:, 0:1, :]  # Shape: [batch_size * num_posts, 1, hidden_size]
+            x = last_hidden_state.mean(1)  # Shape: [batch_size * num_posts, 1, hidden_size]
         elif self.pool_type == 'mean':
             x = mean_pooling(last_hidden_state, flat_attention_mask).unsqueeze(1)  # Shape: [batch_size * num_posts, 1, hidden_size]
 
@@ -336,18 +338,17 @@ class PsyEx_wo_symp(nn.Module):
 
         # Process through user encoder
         x = self.user_encoder(x)  # Shape: [batch_size, num_posts, hidden_size]
-
+        x=x.mean(1)
         # Compute attention scores for all diseases
-        attn_scores = torch.softmax(self.attn_ff(x).squeeze(-1), dim=1)   # Shape: [batch_size, num_diseases, num_posts]
+        projection=self.activation(self.projection_layer(x))   # Shape: [batch_size, num_diseases, num_posts]
 
         # Compute weighted features for all diseases
-        attn_embedding=torch.bmm(attn_scores.unsqueeze(1),x).squeeze(1)
         # Apply dropout
 
         # Compute logits for all diseases
-        logits = self.clf(attn_embedding)
+        logits = self.clf(projection)
 
-        return logits, attn_scores
+        return logits
 
 def mean_pooling(token_embeddings, attention_mask):
     input_mask_expanded = attention_mask.unsqueeze(-1).expand(token_embeddings.size()).float()
@@ -357,8 +358,7 @@ def mean_pooling(token_embeddings, attention_mask):
 # Training and Evaluation Code
 def train_model(model, train_loader, val_loader, criterion, optimizer, num_epochs, device, threshold=0.5, disease='None', setting='binary'):
     best_f1 = 0.0
-    model.load_state_dict(torch.load("/w/331/abdulbasit/mhc_classification/mental_bert_25_lr/model_13.pth"))
-    for epoch in range(13,num_epochs):
+    for epoch in range(num_epochs):
         model.train()
         total_loss = 0.0
         for batch in tqdm(train_loader):
@@ -368,7 +368,7 @@ def train_model(model, train_loader, val_loader, criterion, optimizer, num_epoch
             label_masks = label_masks.to(device)
 
             optimizer.zero_grad()
-            y_hat, attn_scores = model(x)
+            y_hat= model(x)
             loss = criterion(y_hat, y,train_class_weight)
             loss.backward()
             optimizer.step()
@@ -377,7 +377,7 @@ def train_model(model, train_loader, val_loader, criterion, optimizer, num_epoch
         
             
         avg_train_loss = total_loss / len(train_loader)
-        torch.save(model.state_dict(),f"/scratch/expires-2024-Dec-14/abdulbasit/left_stream_1e-4/model_{epoch+1}.pth")
+        torch.save(model.state_dict(),f"/scratch/expires-2024-Dec-14/abdulbasit/H1_TE1_15P/model_{epoch+1}.pth")
         print(f"Epoch [{epoch+1}/{num_epochs}], Training Loss: {avg_train_loss:.4f}")
         
         # Validation
@@ -392,7 +392,7 @@ def train_model(model, train_loader, val_loader, criterion, optimizer, num_epoch
                 y = y.to(device)
                 label_masks = label_masks.to(device)
 
-                y_hat, attn_scores = model(x)
+                y_hat = model(x)
                 loss = criterion(y_hat, y, train_class_weight)
                 total_val_loss += loss.item()
 
@@ -421,7 +421,7 @@ def test_model(model, test_loader, criterion, device, threshold=0.5, disease='No
             y = y.to(device)
             label_masks = label_masks.to(device)
 
-            y_hat, attn_scores = model(x)
+            y_hat = model(x)
             loss = criterion(y_hat, y, [train_class_weight[i] for i in range(len(id2disease))])
             total_test_loss += loss.item()  # Add loss to the total test loss
 
@@ -443,11 +443,11 @@ def test_model(model, test_loader, criterion, device, threshold=0.5, disease='No
 if __name__ == "__main__":
     # Hyperparameters and configurations
     input_dir = "/w/247/abdulbasit/mental_health_dataset_split" 
-    batch_size = 4
+    batch_size =4
     max_len = 280
     max_posts = 500
-    epochs = 50
-    learning_rate = 1e-4
+    epochs = 100
+    learning_rate = 1e-3
     control_ratio = 0.5
     disease = None  # Use 'None' for all diseases or specify one like 'anxiety'
     setting = 'binary'
