@@ -16,6 +16,7 @@ from sklearn.metrics import f1_score, precision_score, recall_score, roc_auc_sco
 from torch.nn import functional as F
 from tqdm import tqdm
 from sklearn.utils.class_weight import compute_class_weight
+from transformers import BertTokenizer,BertModel
 # Constants and Mappings
 id2disease = [
     "adhd",
@@ -84,7 +85,8 @@ def masked_logits_loss(logits, labels, masks=None):
         return masked_losses.mean()
     else:
         return losses.mean()
-
+    import torch
+import torch.nn.functional as F
 
 def compute_cross_entropy(predictions, targets, class_weights=None, with_logits=True):
     """
@@ -217,7 +219,7 @@ class HierDataset(Dataset):
         # Tokenize posts only if tokenizer is provided
         sample = {}
         if self.tokenizer!=None:
-            top_k_posts=read_top_k(tweets_file,col_names,25)
+            top_k_posts=read_top_k(tweets_file,col_names,10)
             tokenized = self.tokenizer(top_k_posts, truncation=True, padding='max_length', max_length=self.max_len,return_tensors="pt")
             for k, v in tokenized.items():
                 sample[k] = v
@@ -281,15 +283,14 @@ class SymptomStream(nn.Module):
         logits=self.clf(symp_feats)
 
         return logits, attn_scores
-#4,2
 class PsyEx_wo_symp(nn.Module):
-    def __init__(self, model_type, num_heads=4, num_trans_layers=2, max_posts=25, freeze=True, pool_type="first") -> None:
+    def __init__(self, model_type, num_heads=1, num_trans_layers=1, max_posts=10, freeze=True, pool_type="first") -> None:
         super().__init__()
         self.model_type = model_type
         self.num_heads = num_heads
         self.num_trans_layers = num_trans_layers
         self.pool_type = pool_type
-        self.post_encoder = AutoModel.from_pretrained(model_type).to(device)
+        self.post_encoder = BertModel.from_pretrained(model_type).to(device)
         if freeze:
             for name, param in self.post_encoder.named_parameters():
                 param.requires_grad = False
@@ -347,7 +348,123 @@ class PsyEx_wo_symp(nn.Module):
         # Compute logits for all diseases
         logits = self.clf(attn_embedding)
 
-        return logits, attn_scores
+        return logits
+    
+class simpleBERT(nn.Module):
+    def __init__(self, model_type, num_heads=1, num_trans_layers=1, max_posts=10, freeze=True, pool_type="first") -> None:
+        super().__init__()
+        self.model_type = model_type
+        self.num_heads = num_heads
+        self.num_trans_layers = num_trans_layers
+        self.pool_type = pool_type
+        self.post_encoder = BertModel.from_pretrained(model_type).to(device)
+        if freeze:
+            for name, param in self.post_encoder.named_parameters():
+                param.requires_grad = False
+        self.hidden_dim = self.post_encoder.config.hidden_size
+        self.max_posts = max_posts
+        self.pos_emb = nn.Parameter(torch.Tensor(max_posts, self.hidden_dim))
+        nn.init.xavier_uniform_(self.pos_emb)
+        encoder_layer = nn.TransformerEncoderLayer(d_model=self.hidden_dim, dim_feedforward=self.hidden_dim, nhead=num_heads, activation='gelu',batch_first=True)
+        self.user_encoder = nn.TransformerEncoder(encoder_layer, num_layers=num_trans_layers)
+        self.dropout = nn.Dropout(self.post_encoder.config.hidden_dropout_prob)
+        self.clf = nn.Linear(self.hidden_dim, len(disease2id))
+    
+    def forward(self, batch, **kwargs):
+        # Extract and process tokenized tweets
+        input_ids = torch.stack([user_feats["input_ids"] for user_feats in batch], dim=0)  # Shape: [batch_size, num_posts, seq_len]
+        attention_mask = torch.stack([user_feats["attention_mask"] for user_feats in batch], dim=0)  # Shape: [batch_size, num_posts, seq_len]
+        token_type_ids = torch.stack([user_feats["token_type_ids"] for user_feats in batch], dim=0)  # Shape: [batch_size, num_posts, seq_len]
+
+        batch_size, num_posts, seq_len = input_ids.shape
+
+        # Flatten posts for processing through the encoder
+        flat_input_ids = input_ids.view(-1, seq_len)  # Shape: [batch_size * num_posts, seq_len]
+        flat_attention_mask = attention_mask.view(-1, seq_len)  # Shape: [batch_size * num_posts, seq_len]
+        flat_token_type_ids = token_type_ids.view(-1, seq_len)  # Shape: [batch_size * num_posts, seq_len]
+
+        # Process through post encoder
+        self.post_encoder.eval()
+        post_outputs = self.post_encoder(flat_input_ids, flat_attention_mask ,flat_token_type_ids)
+        last_hidden_state = post_outputs.last_hidden_state  # Shape: [batch_size * num_posts, seq_len, hidden_size]
+
+        # Pooling (first or mean)
+        if self.pool_type == "first":
+            x = last_hidden_state.mean(1)  # Shape: [batch_size * num_posts, 1, hidden_size]
+        elif self.pool_type == 'mean':
+            x = mean_pooling(last_hidden_state, flat_attention_mask).unsqueeze(1)  # Shape: [batch_size * num_posts, 1, hidden_size]
+
+        # Reshape back to [batch_size, num_posts, hidden_size]
+        x = x.view(batch_size, num_posts, self.hidden_dim)
+
+        # Add positional embeddings
+        pos_emb = self.pos_emb[:num_posts, :].unsqueeze(0)  # Shape: [1, num_posts, hidden_size]
+        x = x + pos_emb
+
+        # Process through user encoder
+        x = self.user_encoder(x)  # Shape: [batch_size, num_posts, hidden_size]
+
+        # Compute attention scores for all diseases
+        x=x.mean(1)
+        # Apply dropout
+
+        # Compute logits for all diseases
+        logits = self.clf(x)
+
+        return logits
+class simpleBERT_extreme(nn.Module):
+    def __init__(self, model_type, num_heads=1, num_trans_layers=1, max_posts=10, freeze=True, pool_type="first") -> None:
+        super().__init__()
+        self.model_type = model_type
+        self.num_heads = num_heads
+        self.num_trans_layers = num_trans_layers
+        self.pool_type = pool_type
+        self.post_encoder = BertModel.from_pretrained(model_type).to(device)
+        if freeze:
+            for name, param in self.post_encoder.named_parameters():
+                param.requires_grad = False
+        self.hidden_dim = self.post_encoder.config.hidden_size
+        self.max_posts = max_posts
+        self.iterim=nn.Linear(self.hidden_dim,self.hidden_dim)
+        self.ReLU=nn.ReLU()
+        self.dropout = nn.Dropout(self.post_encoder.config.hidden_dropout_prob)
+        self.clf = nn.Linear(self.hidden_dim, len(disease2id))
+    
+    def forward(self, batch, **kwargs):
+        # Extract and process tokenized tweets
+        input_ids = torch.stack([user_feats["input_ids"] for user_feats in batch], dim=0)  # Shape: [batch_size, num_posts, seq_len]
+        attention_mask = torch.stack([user_feats["attention_mask"] for user_feats in batch], dim=0)  # Shape: [batch_size, num_posts, seq_len]
+        token_type_ids = torch.stack([user_feats["token_type_ids"] for user_feats in batch], dim=0)  # Shape: [batch_size, num_posts, seq_len]
+
+        batch_size, num_posts, seq_len = input_ids.shape
+
+        # Flatten posts for processing through the encoder
+        flat_input_ids = input_ids.view(-1, seq_len)  # Shape: [batch_size * num_posts, seq_len]
+        flat_attention_mask = attention_mask.view(-1, seq_len)  # Shape: [batch_size * num_posts, seq_len]
+        flat_token_type_ids = token_type_ids.view(-1, seq_len)  # Shape: [batch_size * num_posts, seq_len]
+
+        # Process through post encoder
+        self.post_encoder.eval()
+        post_outputs = self.post_encoder(flat_input_ids, flat_attention_mask ,flat_token_type_ids)
+        last_hidden_state = post_outputs.last_hidden_state  # Shape: [batch_size * num_posts, seq_len, hidden_size]
+
+        # Pooling (first or mean)
+        if self.pool_type == "first":
+            x = last_hidden_state.mean(1)  # Shape: [batch_size * num_posts, 1, hidden_size]
+        elif self.pool_type == 'mean':
+            x = mean_pooling(last_hidden_state, flat_attention_mask).unsqueeze(1)  # Shape: [batch_size * num_posts, 1, hidden_size]
+
+        # Reshape back to [batch_size, num_posts, hidden_size]
+        x = x.view(batch_size, num_posts, self.hidden_dim)
+
+        # Add positional embeddings
+        x=x.mean(1)
+        x=self.ReLU(self.iterim(x))
+
+        # Compute logits for all diseases
+        logits = self.clf(x)
+
+        return logits
 
 def mean_pooling(token_embeddings, attention_mask):
     input_mask_expanded = attention_mask.unsqueeze(-1).expand(token_embeddings.size()).float()
@@ -357,8 +474,8 @@ def mean_pooling(token_embeddings, attention_mask):
 # Training and Evaluation Code
 def train_model(model, train_loader, val_loader, criterion, optimizer, num_epochs, device, threshold=0.5, disease='None', setting='binary'):
     best_f1 = 0.0
-    model.load_state_dict(torch.load("/w/331/abdulbasit/mhc_classification/mental_bert_25_lr/model_13.pth"))
-    for epoch in range(13,num_epochs):
+
+    for epoch in range(num_epochs):
         model.train()
         total_loss = 0.0
         for batch in tqdm(train_loader):
@@ -368,7 +485,7 @@ def train_model(model, train_loader, val_loader, criterion, optimizer, num_epoch
             label_masks = label_masks.to(device)
 
             optimizer.zero_grad()
-            y_hat, attn_scores = model(x)
+            y_hat = model(x)
             loss = criterion(y_hat, y,train_class_weight)
             loss.backward()
             optimizer.step()
@@ -377,7 +494,7 @@ def train_model(model, train_loader, val_loader, criterion, optimizer, num_epoch
         
             
         avg_train_loss = total_loss / len(train_loader)
-        torch.save(model.state_dict(),f"/scratch/expires-2024-Dec-14/abdulbasit/left_stream_1e-4/model_{epoch+1}.pth")
+        torch.save(model.state_dict(),f"/w/331/abdulbasit/mhc_classification/bert_model_simple/model_{epoch+1}.pth")
         print(f"Epoch [{epoch+1}/{num_epochs}], Training Loss: {avg_train_loss:.4f}")
         
         # Validation
@@ -392,7 +509,7 @@ def train_model(model, train_loader, val_loader, criterion, optimizer, num_epoch
                 y = y.to(device)
                 label_masks = label_masks.to(device)
 
-                y_hat, attn_scores = model(x)
+                y_hat= model(x)
                 loss = criterion(y_hat, y, train_class_weight)
                 total_val_loss += loss.item()
 
@@ -447,17 +564,17 @@ if __name__ == "__main__":
     max_len = 280
     max_posts = 500
     epochs = 50
-    learning_rate = 1e-4
+    learning_rate = 1e-3
     control_ratio = 0.5
     disease = None  # Use 'None' for all diseases or specify one like 'anxiety'
     setting = 'binary'
     use_symp = True  # Only use symptom features
     bal_sample = False  # Set to True if you want to use BalanceSampler
     threshold = 0.5  # Threshold for classification
-    model_type="mental/mental-bert-base-uncased"
+    model_type="bert-base-uncased"
     #model_type="distilbert-base-uncased"
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    tokenizer = AutoTokenizer.from_pretrained(model_type)
+    tokenizer = BertTokenizer.from_pretrained('bert-base-uncased')
 
     # Instantiate datasets
     train_dataset = HierDataset(
@@ -510,7 +627,7 @@ if __name__ == "__main__":
         max_posts=max_posts
     ).to(device)'''
    
-    model=PsyEx_wo_symp(model_type).to(device=device)
+    model=simpleBERT_extreme(model_type).to(device=device)
 
     # Example of target with class indices
  
