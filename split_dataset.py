@@ -11,7 +11,6 @@ id2disease = [
     "bipolar",
     "depression",
     "mdd",
-    "neg",
     "ocd",
     "ppd",
     "ptsd"
@@ -21,11 +20,11 @@ disease2id = {disease: id for id, disease in enumerate(id2disease)}
 def create_data_splits(input_dir, output_dir, train_ratio=0.7, val_ratio=0.10, test_ratio=0.20):
     os.makedirs(output_dir, exist_ok=True)
     
-    for folder in id2disease:
+    for folder in os.listdir(input_dir):
         folder_path = os.path.join(input_dir, folder)
         if not os.path.isdir(folder_path):
             continue
-            
+        
         profiles = os.listdir(folder_path)
         train_profiles, temp_profiles = train_test_split(profiles, test_size=(1 - train_ratio), random_state=seed)
         val_profiles, test_profiles = train_test_split(temp_profiles, test_size=test_ratio / (val_ratio + test_ratio), random_state=seed)
@@ -39,4 +38,6 @@ def create_data_splits(input_dir, output_dir, train_ratio=0.7, val_ratio=0.10, t
                 os.symlink(src, dest)  # Creates symbolic links to avoid duplicating data
 
 
-create_data_splits("/w/247/abdulbasit", "/w/247/abdulbasit/mental_health_dataset_split")
+#create_data_splits("/w/247/baileyng/mental_dataset", "/w/247/baileyng/mental_dataset_split")
+
+create_data_splits("/w/247/abdulbasit", "/w/247/baileyng/mental_dataset_split_compressed")
