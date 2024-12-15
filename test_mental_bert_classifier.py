@@ -1,13 +1,12 @@
-from mentalBertClassifier import mentalBertClassifier
+from mental_bert_classifier import mentalBertClassifier
 import os
-import numpy as np
 import json
 import time
 import torch
 from transformers import pipeline, AutoModelForSequenceClassification, AutoTokenizer
 import warnings
-import pandas as pd
-# from huggingface_hub import login
+import matplotlib.pyplot as plt
+
 
 warnings.filterwarnings("ignore", message="Length of IterableDataset")
 
@@ -67,7 +66,7 @@ symptoms = [
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 model_name = "bert-base-uncased"
 classifier = mentalBertClassifier(model_name, device)
-state_dict_path = "mentalBertClassifier2.pth"
+state_dict_path = "mentalBertClassifierBig.pth"
 classifier.load_state_dict(torch.load(state_dict_path, map_location=device))
 classifier.eval()
 
@@ -77,12 +76,12 @@ tokenizer_instructor = AutoTokenizer.from_pretrained(model_name)
 classifier_pipeline = pipeline("zero-shot-classification", model=instructor, tokenizer=tokenizer_instructor, device=device)
 
 
-batch_size = 2
+batch_size = 8
 
+losses = []
 base_path = "processed"
 for split in ["test"]:
     for disease in id2disease:
-        start_time = time.time()
         disease_dir = os.path.join(base_path, split, disease)
         i = 0
         for user_dir in os.listdir(disease_dir):
@@ -97,10 +96,10 @@ for split in ["test"]:
                     for tweet in tweet_list:
                         if tweet['text'].strip(): # Avoids empty tweets
                             tweets.append(tweet['text'])
-
                 results = []
                 try:
-                    classifications = classifier_pipeline(tweets[:2], candidate_labels=symptoms, multi_label=True, batch_size=batch_size)
+                    start_time = time.time()
+                    classifications = classifier_pipeline(tweets[:8], candidate_labels=symptoms, multi_label=True, batch_size=batch_size)
                 except ValueError as e:
                     print(f"Error: {e}")
                     print(f"Texts: {tweets[:2]}")
@@ -111,11 +110,16 @@ for split in ["test"]:
                     results.append(scores)
                 results = torch.tensor([list(result.values()) for result in results], requires_grad=False).to(device)
 
-                logits = classifier.classify(tweets[:2])
-                if(i%20==0):
-                    print(logits[0]-results[0])
-                    print(torch.nn.functional.mse_loss(logits, results))
-                i+=1
+                logits = classifier.classify(tweets[:8])
                 
-        print("Max allocated memory:", torch.cuda.max_memory_allocated())
-        print(f"Processed {disease} in {time.time() - start_time:.2f} seconds")
+                loss = torch.nn.functional.mse_loss(logits, results)
+                losses.append(loss.item())
+
+print(f"Mean loss: {sum(losses) / len(losses)}")
+
+plt.plot(losses)
+plt.xlabel('Batch')
+plt.ylabel('Loss')
+plt.title('Loss per Batch')
+plt.show()
+

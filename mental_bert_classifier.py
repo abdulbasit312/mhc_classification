@@ -20,13 +20,20 @@ class mentalBertClassifier:
             "model": self.model.state_dict(),
             "linear_classifier": self.linear_classifier.state_dict()
         }
+    
+    def load_state_dict(self, state_dict):
+        self.model.load_state_dict(state_dict["model"])
+        self.linear_classifier.load_state_dict(state_dict["linear_classifier"])
+
+    def eval(self):
+        self.model.eval()
+        self.linear_classifier.eval()
 
     def classify(self, text):
         inputs = self.tokenizer(text, return_tensors="pt", padding='max_length', truncation=True, max_length=100).to(self.device)
         with torch.no_grad():
             outputs = self.model(**inputs)
             embeddings = outputs.last_hidden_state
-            # embeddings has shape (batch_size, sequence_length, hidden_size)
             logits = self.linear_classifier(embeddings.view(-1, 768*100))
             probabilities = self.sigmoid(logits)
             return probabilities
@@ -36,6 +43,6 @@ if __name__ == "__main__":
     model_name = "bert-base-uncased"
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     classifier = mentalBertClassifier(model_name, device)
-    example_sentences = ["I am feeling very sad today asd asd asd asd asd asd asd asd asd", "I am feeling very happy today"]
+    example_sentences = ["I am quite sad today", "I am feeling very happy today"]
     logits = classifier.classify(example_sentences)
     print(logits)

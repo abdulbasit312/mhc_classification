@@ -1,13 +1,10 @@
-from mentalBertClassifier import mentalBertClassifier
+from mental_bert_classifier import mentalBertClassifier
 import os
-import numpy as np
 import json
 import time
 import torch
 from transformers import pipeline, AutoModelForSequenceClassification, AutoTokenizer
 import warnings
-import pandas as pd
-# from huggingface_hub import login
 
 warnings.filterwarnings("ignore", message="Length of IterableDataset")
 
@@ -75,7 +72,7 @@ tokenizer_instructor = AutoTokenizer.from_pretrained(model_name)
 classifier_pipeline = pipeline("zero-shot-classification", model=instructor, tokenizer=tokenizer_instructor, device=device)
 
 
-batch_size = 16
+batch_size = 32
 
 base_path = "processed"
 for split in ["train"]:
@@ -97,10 +94,10 @@ for split in ["train"]:
 
                 results = []
                 try:
-                    classifications = classifier_pipeline(tweets[:16], candidate_labels=symptoms, multi_label=True, batch_size=batch_size)
+                    classifications = classifier_pipeline(tweets[:250], candidate_labels=symptoms, multi_label=True, batch_size=batch_size)
                 except ValueError as e:
                     print(f"Error: {e}")
-                    print(f"Texts: {tweets[:16]}")
+                    print(f"Texts: {tweets[:250]}")
                     print(f"Labels: {symptoms}")
                 
                 for classification in classifications:
@@ -108,9 +105,10 @@ for split in ["train"]:
                     results.append(scores)
                 results = torch.tensor([list(result.values()) for result in results], requires_grad=False).to(device)
 
-                logits = classifier.classify(texts[:16])
+                logits = classifier.classify(tweets[:250])
                 logits.requires_grad = True
 
+                print(logits)
                 loss = torch.nn.functional.mse_loss(logits, results)
                 loss.backward()
                 optimizer.step()
@@ -120,6 +118,7 @@ for split in ["train"]:
         print(f"Processed {disease} in {time.time() - start_time:.2f} seconds")
         print(loss.item())
 
-model_save_path = "mentalBertClassifier.pth"
+model_save_path = "mentalBertClassifier4.pth"
 torch.save(classifier.state_dict(), model_save_path)
 print(f"Model saved to {model_save_path}")
+ 
