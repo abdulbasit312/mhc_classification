@@ -18,7 +18,7 @@ from tqdm import tqdm
 from sklearn.utils.class_weight import compute_class_weight
 from warmup_scheduler import GradualWarmupScheduler
 
-mode = "cosine4"   #Choose between cosine3 or cosine4
+mode = "cosine4"   #Choose between "cosine3" or "cosine4"
 
 # Constants and Mappings
 id2disease = [
