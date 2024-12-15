@@ -3,13 +3,9 @@ import numpy as np
 import json
 import time
 import torch
-from transformers import AutoTokenizer, AutoModel
 import warnings
 import pandas as pd
-from mentalBertClassifier import mentalBertClassifier
-# from huggingface_hub import login
-
-# login()
+from mental_bert_classifier import mentalBertClassifier
 
 id2disease = [
     "adhd",
@@ -76,7 +72,7 @@ classifier.eval()
 topK = 16
 batch_size = 32
 
-base_path = "../../abdulbasit"
+base_path = "../../abdulbasit" # Change this to path of dataset with all diseases and compressed.json files
 for disease in id2disease:
     disease_dir = os.path.join(base_path, disease)
     start_time = time.time()
