@@ -2,7 +2,7 @@ These are the codes for the CSC 2516 Course Project
 
 Team Members:
 Mohammad Abdul Basit - abdulbasit@cs.toronto.edu
-Bailey Ng
+Bailey Ng - baileyng@cs.toronto.edu
 Noe Artru
 
 Dataset is very huge (~100GB), and can be shared on request, or if you have access to CS lab clusters you can find it at: "/w/247/abdulbasit/mental_health_dataset_split"
