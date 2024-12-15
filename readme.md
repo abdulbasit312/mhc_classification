@@ -3,10 +3,10 @@ These are the codes for the CSC 2516 Course Project
 Team Members:
 Mohammad Abdul Basit - abdulbasit@cs.toronto.edu
 Bailey Ng - baileyng@cs.toronto.edu
-Noe Artru
+Noe Artru - noeartru@cs.toronto.edu
 
 Dataset is very huge (~100GB), and can be shared on request, or if you have access to CS lab clusters you can find it at: "/w/247/abdulbasit/mental_health_dataset_split"
-Trained models can also be provided, they couldnt be uploaded to markus.
+Trained models can also be provided, they couldn't be uploaded to markus.
 
 Description of files: We have kept the training files for the streams seperate so that the reviewers find it easier to run the experiments.
 
@@ -24,6 +24,6 @@ Description of files: We have kept the training files for the streams seperate s
 9. GRU_symptom_stream.py -> Used to train GRU iteration of symptom stream with different learning rates.
 10. download_images.py -> downloads user tweet images out of urls to serve as training data for the image classifier stream 
 11. image_stream.py + image_stream_test.py -> classifies user mental health condition using those images
-12. llm_classifier.py + llm_stats -> Baseline LLM testing of the project's objective using Llama3.3 
+12. llm_classifier.py + llm_stats.py -> Baseline LLM testing of the project's objective using Llama3.3 
 
 Repository inspired by https://github.com/chesiy/EMNLP23-PsyEx
