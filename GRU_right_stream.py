@@ -19,7 +19,7 @@ from sklearn.utils.class_weight import compute_class_weight
 from warmup_scheduler import GradualWarmupScheduler
 
 
-mode = "GRU4"   #Choose between GRU3 or GRU4
+mode = "GRU4"   #Choose between "GRU3" or "GRU4"
 
 # Constants and Mappings
 id2disease = [
