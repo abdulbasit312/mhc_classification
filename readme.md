@@ -6,6 +6,7 @@ Bailey Ng - baileyng@cs.toronto.edu
 Noe Artru
 
 Dataset is very huge (~100GB), and can be shared on request, or if you have access to CS lab clusters you can find it at: "/w/247/abdulbasit/mental_health_dataset_split"
+Trained models can also be provided, they couldnt be uploaded to markus.
 
 Description of files: We have kept the training files for the streams seperate so that the reviewers find it easier to run the experiments.
 
