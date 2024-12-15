@@ -14,3 +14,6 @@ Description of files: We have kept the training files for the streams seperate s
                 projection vector. 
                 Usage for training: python combined.py
                 Usage for testing python combined.py --mode=test --test_ckpt=/w/331/abdulbasit/mhc_classification/ckpt_combined
+
+
+Repository inspired by https://github.com/chesiy/EMNLP23-PsyEx
