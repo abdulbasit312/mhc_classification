@@ -16,6 +16,7 @@ from sklearn.metrics import f1_score, precision_score, recall_score, roc_auc_sco
 from torch.nn import functional as F
 from tqdm import tqdm
 from sklearn.utils.class_weight import compute_class_weight
+from glob import glob
 # Constants and Mappings
 id2disease = [
     "adhd",
@@ -65,7 +66,7 @@ def mean_pooling(token_embeddings, attention_mask):
     input_mask_expanded = attention_mask.unsqueeze(-1).expand(token_embeddings.size()).float()
     return torch.sum(token_embeddings * input_mask_expanded, 1) / torch.clamp(input_mask_expanded.sum(1), min=1e-9)
 
-def get_avg_metrics(all_labels, all_probs, threshold, disease=None, setting='binary', class_names=id2disease):
+def get_avg_metrics(all_labels, all_probs):
     predicted=np.argmax(all_probs,axis=1)
     print(f"Accuracy: {accuracy_score(all_labels,predicted)} \n")
     print(classification_report(all_labels,predicted,labels=list(disease2id.values()),target_names=id2disease))
@@ -113,55 +114,9 @@ def compute_cross_entropy(predictions, targets, class_weights=None, with_logits=
     
     return loss
     
-# Custom Dataset and Sampler
-class BalanceSampler(Sampler):
-    def __init__(self, data_source, control_ratio=0.75) -> None:
-        self.data_source = data_source
-        self.control_ratio = control_ratio
-        self.indexes_control = np.where(data_source.is_control == 1)[0]
-        self.indexes_diseases = []
-        for idx, disease in enumerate(id2disease):
-            disease_indexes = np.where(np.array(data_source.labels)[:, idx] == 1)[0]
-            print(f"Disease indexes for {disease}: {disease_indexes}")
-            self.indexes_diseases.append(disease_indexes)
-        self.len_control = len(self.indexes_control)
-        self.len_diseases = [len(disease_idx) for disease_idx in self.indexes_diseases]
-        np.random.shuffle(self.indexes_control)
-        for i in range(len(self.indexes_diseases)):
-            np.random.shuffle(self.indexes_diseases[i])
-
-        self.pointer_control = 0
-        self.pointer_disease = [0] * len(id2disease)
-
-    def __iter__(self):
-        for i in range(len(self.data_source)):
-            rand_num = np.random.rand()
-            if rand_num < self.control_ratio:
-                id0 = np.random.randint(self.pointer_control, self.len_control)
-                sel_id = self.indexes_control[id0]
-                self.indexes_control[id0], self.indexes_control[self.pointer_control] = self.indexes_control[self.pointer_control], self.indexes_control[id0]
-                self.pointer_control += 1
-                if self.pointer_control >= self.len_control:
-                    self.pointer_control = 0
-                    np.random.shuffle(self.indexes_control)
-            else:
-                chosen_disease = math.floor((rand_num - self.control_ratio) * 1.0 / ((1 - self.control_ratio) / len(id2disease)))
-                id0 = np.random.randint(self.pointer_disease[chosen_disease], self.len_diseases[chosen_disease])
-                sel_id = self.indexes_diseases[chosen_disease][id0]
-                self.indexes_diseases[chosen_disease][id0] = self.indexes_diseases[chosen_disease][self.pointer_disease[chosen_disease]]
-                self.indexes_diseases[chosen_disease][self.pointer_disease[chosen_disease]] = self.indexes_diseases[chosen_disease][id0]
-                self.pointer_disease[chosen_disease] += 1
-                if self.pointer_disease[chosen_disease] >= self.len_diseases[chosen_disease]:
-                    self.pointer_disease[chosen_disease] = 0
-                    np.random.shuffle(self.indexes_diseases[chosen_disease])
-
-            yield sel_id
-
-    def __len__(self) -> int:
-        return len(self.data_source)
 
 class HierDataset(Dataset):
-    def __init__(self, input_dir, tokenizer, max_len, split="train", disease='None', setting='binary', use_symp=True, max_posts=64):
+    def __init__(self, input_dir, tokenizer, max_len, split="train", use_symp=True, max_posts=64):
         assert split in {"train", "val", "test"}
         self.input_dir = os.path.join(input_dir, split)  # Use split folder
         self.tokenizer = tokenizer
@@ -187,7 +142,7 @@ class HierDataset(Dataset):
             # Inside HierDataset class
             for profile_folder in os.listdir(folder_path):
                 profile_path = os.path.join(folder_path, profile_folder)
-                tweets_file = os.path.join(profile_path, "tweets_preprocessed.parquet")
+                tweets_file = os.path.join(profile_path, "tweets_preprocessed_2.parquet")
                 self.tweets_file_list.append(tweets_file)
                 self.labels.append(label)
         if(split=="train"):
@@ -245,45 +200,34 @@ def my_collate_hier(data):
 
 # Model Definition
 class SymptomStream(nn.Module):
-    def __init__(self, num_heads=8, num_trans_layers=6, max_posts=64):
+    def __init__(self):
         super().__init__()
-        self.max_posts = max_posts
-        self.hidden_dim = 38  # Number of symptom features
-        if self.hidden_dim % num_heads != 0:
-            raise ValueError(f"`num_heads` must divide `hidden_dim` (38). Use `num_heads` as 1, 2, or 19.")
-
+        
+        #self.attn=nn.Linear(38,1)
+        #self.activation=nn.Softmax(dim=-1)
+        self.projection=nn.Linear(38,512)
+        #self.projection2=nn.Linear(4096,2048)
+        self.projection3=nn.Linear(512,256)
+        self.relu1=nn.ReLU()
+        self.relu2=nn.ReLU()
         # Transformer Encoder for Symptoms
-        self.attn_ff_for_symp = nn.ModuleList([nn.Linear(38, 1) for disease in id2disease])
 
-        self.dropout = nn.Dropout(0.1)
-        self.clf = nn.Linear(342,len(id2disease))
+        self.dropout = nn.Dropout(0.3)
 
     def forward(self, batch, **kwargs):
     # Extract symptom tensors from batch and stack into a single tensor
         symp_tensor = torch.stack([user_feats["symp"] for user_feats in batch], dim=0)  # Shape: [batch_size, max_posts, hidden_dim]
+        #attn_w=self.activation(self.attn(symp_tensor).squeeze(-1))
+        #x=torch.bmm(attn_w.unsqueeze(1),symp_tensor).squeeze(1)
+        x=symp_tensor.mean(1)
+        projection=self.dropout(self.relu1(self.projection(x)))
+        #projection=self.dropout(self.gelu2(self.projection2(projection)))
+        projection=self.dropout(self.relu2(self.projection3(projection)))
 
-        # Compute disease-specific attention scores for all diseases in parallel
-        attn_scores = torch.stack([
-            torch.softmax(attn_ff(symp_tensor).squeeze(-1), dim=-1)  # Shape: [batch_size, max_posts]
-            for attn_ff in self.attn_ff_for_symp
-        ], dim=1)  # Shape: [batch_size, num_diseases, max_posts]
 
-        # Compute weighted features using attention scores
-        symp_feats = torch.einsum('bnp,bpd->bnd', attn_scores, symp_tensor)  # Shape: [batch_size, num_diseases, hidden_dim]
-
-        # Apply dropout
-        symp_feats = self.dropout(symp_feats)
-        symp_feats=symp_feats.reshape(symp_feats.shape[0],-1)
-        # Compute logits for all diseases in parallel
-        '''logits = torch.cat([
-            clf(symp_feats[:, i, :]) for i, clf in enumerate(self.clf)
-        ], dim=1)  # Shape: [batch_size, num_diseases]'''
-        logits=self.clf(symp_feats)
-
-        return logits, attn_scores
-#4,2
+        return projection
 class PsyEx_wo_symp(nn.Module):
-    def __init__(self, model_type, num_heads=4, num_trans_layers=2, max_posts=25, freeze=True, pool_type="first") -> None:
+    def __init__(self, model_type, num_heads=2, num_trans_layers=1, max_posts=25, freeze=True, pool_type="first") -> None:
         super().__init__()
         self.model_type = model_type
         self.num_heads = num_heads
@@ -301,7 +245,6 @@ class PsyEx_wo_symp(nn.Module):
         self.user_encoder = nn.TransformerEncoder(encoder_layer, num_layers=num_trans_layers)
         self.attn_ff = nn.Linear(self.hidden_dim, 1)
         self.dropout = nn.Dropout(self.post_encoder.config.hidden_dropout_prob)
-        self.clf = nn.Linear(self.hidden_dim, len(disease2id))
     
     def forward(self, batch, **kwargs):
         # Extract and process tokenized tweets
@@ -338,16 +281,59 @@ class PsyEx_wo_symp(nn.Module):
         x = self.user_encoder(x)  # Shape: [batch_size, num_posts, hidden_size]
 
         # Compute attention scores for all diseases
-        attn_scores = torch.softmax(self.attn_ff(x).squeeze(-1), dim=1)   # Shape: [batch_size, num_diseases, num_posts]
+        attn_scores = self.dropout(torch.softmax(self.attn_ff(x).squeeze(-1), dim=1))   # Shape: [batch_size, num_diseases, num_posts]
 
         # Compute weighted features for all diseases
         attn_embedding=torch.bmm(attn_scores.unsqueeze(1),x).squeeze(1)
         # Apply dropout
 
         # Compute logits for all diseases
-        logits = self.clf(attn_embedding)
 
-        return logits, attn_scores
+        return attn_embedding
+class Project_layer(nn.Module):
+    def __init__(self,num_projection_layers,input_dim,project_dims,dropout_rate):
+        super().__init__()
+        self.projection1=nn.Linear(input_dim,project_dims)
+        self.num_projection_layer=num_projection_layers
+        self.projection_loop=nn.ModuleList()
+        self.layer_norms=nn.ModuleList()
+        for _ in range(num_projection_layers):
+            t=nn.Sequential(nn.GELU(),
+                          nn.Linear(project_dims,project_dims),
+                          nn.Dropout(dropout_rate))
+            self.projection_loop.append(t)
+            self.layer_norms.append(nn.LayerNorm(project_dims))
+    def forward(self,x):
+        embed=self.projection1(x)
+        for i in range(self.num_projection_layer):
+            x=self.projection_loop[i](embed)
+            x=x+embed
+            embed=self.layer_norms[i](x)
+        return embed
+class Combine_results(nn.Module):
+    def __init__(self,model_type, num_heads=4, num_trans_layers=1, max_posts=25, freeze=True, pool_type="first",use_projecton=False):
+        super().__init__()
+        self.left_stream=PsyEx_wo_symp(model_type, num_heads=num_heads, num_trans_layers=num_trans_layers, max_posts=max_posts, freeze=freeze, pool_type=pool_type)
+        self.symptom_stream=SymptomStream()
+        self.use_projection=use_projecton
+        if use_projecton:
+            self.projection_dim_left=512
+            self.projection_dim_right=128
+            self.hidden_size=self.projection_dim_left+self.projection_dim_right
+            self.left_projection=Project_layer(1,768,self.projection_dim_left,0.4)
+            self.right_projection=Project_layer(1,256,self.projection_dim_right,0.4)
+        else:
+            self.hidden_size=768+256
+        self.clf=nn.Linear(self.hidden_size,len(id2disease))
+    def forward(self,batch,**kwargs):
+        left_embedding=self.left_stream(batch)
+        right_stream=self.symptom_stream(batch)
+        if self.use_projection:
+            left_embedding=self.left_projection(left_embedding)
+            right_stream=self.right_projection(right_stream)
+        projection=torch.cat([left_embedding,right_stream],dim=-1)
+        logits=self.clf(projection)
+        return logits
 
 def mean_pooling(token_embeddings, attention_mask):
     input_mask_expanded = attention_mask.unsqueeze(-1).expand(token_embeddings.size()).float()
@@ -355,10 +341,9 @@ def mean_pooling(token_embeddings, attention_mask):
 
 
 # Training and Evaluation Code
-def train_model(model, train_loader, val_loader, criterion, optimizer, num_epochs, device, threshold=0.5, disease='None', setting='binary'):
+def train_model(model, train_loader, val_loader, criterion, optimizer, num_epochs, device, save_path):
     best_f1 = 0.0
-    model.load_state_dict(torch.load("/w/331/abdulbasit/mhc_classification/mental_bert_25_lr/model_13.pth"))
-    for epoch in range(13,num_epochs):
+    for epoch in range(num_epochs):
         model.train()
         total_loss = 0.0
         for batch in tqdm(train_loader):
@@ -368,7 +353,7 @@ def train_model(model, train_loader, val_loader, criterion, optimizer, num_epoch
             label_masks = label_masks.to(device)
 
             optimizer.zero_grad()
-            y_hat, attn_scores = model(x)
+            y_hat= model(x)
             loss = criterion(y_hat, y,train_class_weight)
             loss.backward()
             optimizer.step()
@@ -377,7 +362,9 @@ def train_model(model, train_loader, val_loader, criterion, optimizer, num_epoch
         
             
         avg_train_loss = total_loss / len(train_loader)
-        torch.save(model.state_dict(),f"/scratch/expires-2024-Dec-14/abdulbasit/left_stream_1e-4/model_{epoch+1}.pth")
+        if not os.path.exists(save_path):
+            os.makedirs(save_path)
+        torch.save(model.state_dict(),f"{save_path}/model_{epoch+1}.pth")
         print(f"Epoch [{epoch+1}/{num_epochs}], Training Loss: {avg_train_loss:.4f}")
         
         # Validation
@@ -392,7 +379,7 @@ def train_model(model, train_loader, val_loader, criterion, optimizer, num_epoch
                 y = y.to(device)
                 label_masks = label_masks.to(device)
 
-                y_hat, attn_scores = model(x)
+                y_hat = model(x)
                 loss = criterion(y_hat, y, train_class_weight)
                 total_val_loss += loss.item()
 
@@ -406,142 +393,130 @@ def train_model(model, train_loader, val_loader, criterion, optimizer, num_epoch
         all_labels = np.concatenate(all_labels)
         all_probs = np.concatenate(all_probs)
         avg_val_loss = total_val_loss / len(val_loader)
-        get_avg_metrics(all_labels, all_probs, threshold, disease, setting)
+        get_avg_metrics(all_labels, all_probs)
         print(f"Validation Loss: {avg_val_loss:.4f}")
 
-def test_model(model, test_loader, criterion, device, threshold=0.5, disease='None', setting='binary'):
-    model.eval()
-    total_test_loss = 0.0  # Initialize the test loss variable
-    all_labels = []
-    all_probs = []
-    with torch.no_grad():
-        for batch in test_loader:  # Corrected from `val_loader` to `test_loader`
-            x, y, label_masks = batch
-            x = [{k: v.to(device) for k, v in user_feats.items()} for user_feats in x]
-            y = y.to(device)
-            label_masks = label_masks.to(device)
+def test_model(model, test_loader, criterion, device,ckpt):
+    weights=sorted(glob(ckpt+"/*.pth"))
+    print(weights)
+    for weight in weights:
+        print(weight)
+        total_test_loss = 0.0  # Initialize the test loss variable
+        all_labels = []
+        all_probs = []
+        model.load_state_dict(torch.load(weight,map_location=device,weights_only=True))
+        model.eval()        
+        with torch.no_grad():
+            for batch in tqdm(test_loader):  # Corrected from `val_loader` to `test_loader`
+                x, y, label_masks = batch
+                x = [{k: v.to(device) for k, v in user_feats.items()} for user_feats in x]
+                y = y.to(device)
+                label_masks = label_masks.to(device)
 
-            y_hat, attn_scores = model(x)
-            loss = criterion(y_hat, y, [train_class_weight[i] for i in range(len(id2disease))])
-            total_test_loss += loss.item()  # Add loss to the total test loss
+                y_hat= model(x)
+                loss = criterion(y_hat, y, [train_class_weight[i] for i in range(len(id2disease))])
+                total_test_loss += loss.item()  # Add loss to the total test loss
 
-            probs = torch.sigmoid(y_hat)
-            if probs.dim() == 1:
-                probs = probs.unsqueeze(0)  # Ensure 2D
-            all_labels.append(y.cpu().numpy())
-            all_probs.append(probs.cpu().numpy())
+                probs = F.softmax(y_hat,dim=-1)
+                if probs.dim() == 1:
+                    probs = probs.unsqueeze(0)  # Ensure 2D
+                all_labels.append(y.cpu().numpy())
+                all_probs.append(probs.cpu().numpy())
+                    
 
-    all_labels = np.concatenate(all_labels)
-    all_probs = np.concatenate(all_probs)
+            all_labels = np.concatenate(all_labels)
+            all_probs = np.concatenate(all_probs)
+            avg_val_loss = total_test_loss / len(test_loader)
+            get_avg_metrics(all_labels, all_probs)
+            print(f"Test Loss: {avg_val_loss:.4f}")
 
-    avg_test_loss = total_test_loss / len(test_loader)
-    ret = get_avg_metrics(all_labels, all_probs, threshold, disease, setting)
-    print(f"Test Loss: {avg_test_loss:.4f}")
-    print(f"Test Metrics: {ret}")
-
+def argument_parser():
+    parser=ArgumentParser(prog="Left stream",description="driver code to run and test")
+    parser.add_argument('--mode',default="test",help="which mode you wish to run the program in train/test")
+    parser.add_argument('--test_ckpt',default="",required=False,help="If in test mode provide the path to folder which contains model ckpt")
+    return parser
 # Main Execution
+
 if __name__ == "__main__":
     # Hyperparameters and configurations
+    args=argument_parser().parse_args()
+
     input_dir = "/w/247/abdulbasit/mental_health_dataset_split" 
-    batch_size = 4
+    batch_size = 32
     max_len = 280
     max_posts = 500
     epochs = 50
     learning_rate = 1e-4
-    control_ratio = 0.5
-    disease = None  # Use 'None' for all diseases or specify one like 'anxiety'
-    setting = 'binary'
     use_symp = True  # Only use symptom features
-    bal_sample = False  # Set to True if you want to use BalanceSampler
-    threshold = 0.5  # Threshold for classification
     model_type="mental/mental-bert-base-uncased"
-    #model_type="distilbert-base-uncased"
+    save_path="/w/331/abdulbasit/test_run"  # change to run it in your machine
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     tokenizer = AutoTokenizer.from_pretrained(model_type)
-
-    # Instantiate datasets
-    train_dataset = HierDataset(
-        input_dir=input_dir,
-        tokenizer=tokenizer,  # No tokenizer needed for symptom-only model
-        max_len=max_len,
-        split="train",
-        disease=disease,
-        setting=setting,
-        use_symp=use_symp,
-        max_posts=max_posts
-    )
-
-    val_dataset = HierDataset(
-        input_dir=input_dir,
-        tokenizer=tokenizer,  # No tokenizer needed for symptom-only model
-        max_len=max_len,
-        split="val",
-        disease=disease,
-        setting=setting,
-        use_symp=use_symp,
-        max_posts=max_posts
-    )
-
-    test_dataset = HierDataset(
-        input_dir=input_dir,
-        tokenizer=None,  # No tokenizer needed for symptom-only model
-        max_len=max_len,
-        split="test",
-        disease=disease,
-        setting=setting,
-        use_symp=use_symp,
-        max_posts=max_posts
-    )
-
-    # Instantiate data loaders
-    if bal_sample:
-        sampler = BalanceSampler(train_dataset, control_ratio)
-        train_loader = DataLoader(train_dataset, batch_size=batch_size, collate_fn=my_collate_hier, sampler=sampler, num_workers=0)
-    else:
-        train_loader = DataLoader(train_dataset, batch_size=batch_size, collate_fn=my_collate_hier, shuffle=True, num_workers=2)
-
-    val_loader = DataLoader(val_dataset, batch_size=batch_size, collate_fn=my_collate_hier, shuffle=False, num_workers=2)
-    test_loader = DataLoader(test_dataset, batch_size=batch_size, collate_fn=my_collate_hier, shuffle=False, num_workers=2)
-
-    # Instantiate the model
-    '''model = SymptomStream(
-        num_heads=2,  # Use 1, 2, or 19 for symptom stream
-        num_trans_layers=6,
-        max_posts=max_posts
-    ).to(device)'''
-   
-    model=PsyEx_wo_symp(model_type).to(device=device)
+    model=Combine_results(model_type=model_type,use_projecton=True).to(device=device)
 
     # Example of target with class indices
  
     # Example of target with class probabilities
     # Define optimizer and loss function
-    optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate)
+    optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate,weight_decay=1e-4)
     criterion = compute_cross_entropy
     # Print learnable parameters
     total_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
     print(f"Total Learnable Parameters: {total_params}")
-    # Train the model
-    train_model(
-        model=model,
-        train_loader=train_loader,
-        val_loader=val_loader,
-        criterion=criterion,
-        optimizer=optimizer,
-        num_epochs=epochs,
-        device=device,
-        threshold=threshold,
-        disease=disease,
-        setting=setting
-    )
+    train_dataset = HierDataset(
+    input_dir=input_dir,
+    tokenizer=tokenizer,  
+    max_len=max_len,
+    split="train",
+    use_symp=use_symp,
+    max_posts=max_posts
+)
+    if(args.mode=="train"):
+    # Instantiate datasets
 
-    # Test the model
-    test_model(
-        model=model,
-        test_loader=test_loader,
-        criterion=criterion,
-        device=device,
-        threshold=threshold,
-        disease=disease,
-        setting=setting
-    )
+
+        val_dataset = HierDataset(
+            input_dir=input_dir,
+            tokenizer=tokenizer,  # No tokenizer needed for symptom-only model
+            max_len=max_len,
+            split="val",
+            use_symp=use_symp,
+            max_posts=max_posts
+        )
+        train_loader = DataLoader(train_dataset, batch_size=batch_size, collate_fn=my_collate_hier, shuffle=True, num_workers=2)
+        val_loader = DataLoader(val_dataset, batch_size=batch_size, collate_fn=my_collate_hier, shuffle=False, num_workers=2)
+            # Train the model
+        train_model(
+            model=model,
+            train_loader=train_loader,
+            val_loader=val_loader,
+            criterion=criterion,
+            optimizer=optimizer,
+            num_epochs=epochs,
+            device=device,
+            save_path=save_path
+        )
+    else:
+        test_dataset = HierDataset(
+            
+            input_dir=input_dir,
+            tokenizer=tokenizer,  # No tokenizer needed for symptom-only model
+            max_len=max_len,
+            split="test",
+            use_symp=use_symp,
+            max_posts=max_posts
+        )
+        test_loader = DataLoader(test_dataset, batch_size=batch_size, collate_fn=my_collate_hier, shuffle=False, num_workers=2)
+
+        # Instantiate data loaders
+
+
+
+        # Test the model
+        test_model(
+            model=model,
+            test_loader=test_loader,
+            criterion=criterion,
+            device=device,
+            ckpt=args.test_ckpt if args.test_ckpt!='' else save_path
+        )

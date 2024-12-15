@@ -3,3 +3,5 @@ training_output_25_1e-4.out
 training_output_H1_TE1_15P.out
 training_output2_25_1e-4.err
 training_output2_H1_TE1_15P.err
+__pycache__
+ckpt_combined

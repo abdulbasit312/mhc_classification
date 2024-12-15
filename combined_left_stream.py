@@ -482,7 +482,7 @@ if __name__ == "__main__":
     # Instantiate datasets
     train_dataset = HierDataset(
         input_dir=input_dir,
-        tokenizer=tokenizer,  # No tokenizer needed for symptom-only model
+        tokenizer=tokenizer,  
         max_len=max_len,
         split="train",
         disease=disease,
@@ -493,7 +493,7 @@ if __name__ == "__main__":
 
     val_dataset = HierDataset(
         input_dir=input_dir,
-        tokenizer=tokenizer,  # No tokenizer needed for symptom-only model
+        tokenizer=tokenizer,  
         max_len=max_len,
         split="val",
         disease=disease,
@@ -504,7 +504,7 @@ if __name__ == "__main__":
 
     test_dataset = HierDataset(
         input_dir=input_dir,
-        tokenizer=None,  # No tokenizer needed for symptom-only model
+        tokenizer=tokenizer,  
         max_len=max_len,
         split="test",
         disease=disease,
