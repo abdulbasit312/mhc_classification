@@ -292,7 +292,7 @@ def my_collate_hier(data):
     return processed_batch, labels, label_masks
 
 class PsyEx_wo_symp(nn.Module):
-    def __init__(self, model_type, num_heads=2, num_trans_layers=1, max_posts=25, freeze=True, pool_type="first") -> None:
+    def __init__(self, model_type, num_heads=4, num_trans_layers=2, max_posts=25, freeze=True, pool_type="first") -> None:
         super().__init__()
         self.model_type = model_type
         self.num_heads = num_heads
